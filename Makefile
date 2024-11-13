@@ -2,7 +2,7 @@
 # Makefile for chat server
 #
 CC	= gcc
-EXECUTABLES=chatClient2 chatServer2 directoryServer2
+EXECUTABLES=chatClient5 chatServer5 directoryServer5
 INCLUDES	= $(wildcard *.h)
 SOURCES	= $(wildcard *.c)
 DEPS		= $(INCLUDES)
@@ -30,13 +30,13 @@ all:	chat2
 chat2:	$(EXECUTABLES)
 
 
-chatClient2: chatClient2.c $(DEPS)
+chatClient5: chatClient5.c $(DEPS)
 	$(CC) $(LDFLAGS) $(CFLAGS) $(LIBS) -o $@ $<
 
-chatServer2: chatServer2.c $(DEPS)
+chatServer5: chatServer5.c $(DEPS)
 	$(CC) $(LDFLAGS) $(CFLAGS) $(LIBS) -o $@ $<
 
-directoryServer2: directoryServer2.c $(DEPS)
+directoryServer5: directoryServer5.c $(DEPS)
 	$(CC) $(LDFLAGS) $(CFLAGS) $(LIBS) -o $@ $<
 
 

@@ -10,21 +10,22 @@
 #include "common.h"
 
 struct client {
-	char 				name[MAX];
-	int 				has_name, sock;
+	char 				name[MAX], to[MAX], fr[MAX];
+	char				*toptr, *frptr;
+	int 				has_name, sock, has_message_to_send;
 	LIST_ENTRY(client) 	entries;
 };
 
 int main(int argc, char **argv)
 {
-	int								sockfd, newsockfd, j;
+	char							command, s[MAX], topic[MAX], message[MAX], messageToSend[MAX];
+	int								sockfd, newsockfd, n, j;
 	uint16_t						port;
 	unsigned int					clilen;
-	char							command, s[MAX], topic[MAX], message[MAX], messageToSend[MAX];
 	LIST_HEAD(client_list, client) 	clientHead;
-	fd_set 							readset;
+	fd_set 							readset, writeset;
 	struct sockaddr_in				cli_addr, serv_addr, dir_serv_addr;
-	struct client 					*cli, *innerCli;	
+	struct client 					*cli, *innerCli, *cliToRemove;	
 
 	/* Initialze the list of clients */
 	LIST_INIT(&clientHead);
@@ -132,33 +133,32 @@ int main(int argc, char **argv)
 
 	/* Bind socket to local address */
 	memset((char *) &serv_addr, 0, sizeof(serv_addr));
-	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	serv_addr.sin_port		= htons(port);
+	serv_addr.sin_family 		= AF_INET;
+	serv_addr.sin_addr.s_addr 	= htonl(INADDR_ANY);
+	serv_addr.sin_port			= htons(port);
  
 	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) { 
 		perror("server: can't bind local address"); 
 		exit(1); 
 	} 
  
-	listen(sockfd, 5);
-
 	listen(sockfd, MAX_CLIENTS);
 
 	/* Main Loop for the program*/
 	for (;;) {
-		FD_ZERO(&readset);
+		FD_ZERO(&readset); FD_ZERO(&writeset);
 		/* Set the listening socket in the readset */
 		FD_SET(sockfd, &readset);
 		/* Set the open clients in the readset */
 		int maxSockNum = sockfd;
 		LIST_FOREACH(cli, &clientHead, entries) {
 			FD_SET(cli->sock, &readset);
+			FD_SET(cli->sock, &writeset);
 			if (cli->sock > maxSockNum) maxSockNum = cli->sock;
 		}
 
 		/* Select statement (hangs until a socket is ready) */
-		if ((j = select(maxSockNum+1, &readset, NULL, NULL, NULL)) > 0){ 
+		if ((j = select(maxSockNum+1, &readset, &writeset, NULL, NULL)) > 0){ 
 
 			/* Check if the listening socket can be read */
 			if (FD_ISSET(sockfd, &readset)) {
@@ -166,47 +166,70 @@ int main(int argc, char **argv)
 				clilen = sizeof(cli_addr);
 				if ((newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen)) < 0) {
 					/* something bad happend in the connection. Don't create client */
-					perror("New connection failed");
 				} else {
+					/* Set new socket to non blocking */
+					int val = fcntl(newsockfd, F_GETFL, 0);
+					fcntl(newsockfd, F_SETFL, val | O_NONBLOCK);
+
 					/* add the socket to the client list */
 					struct client *newCli = malloc(sizeof(struct client));
 					memset(newCli->name, '\0', MAX);
 					newCli->has_name = 0;
 					newCli->sock = newsockfd;
+					newCli->toptr = newCli->to;
+					newCli->frptr = newCli->fr;
 					LIST_INSERT_HEAD(&clientHead, newCli, entries);
-
-					memset(messageToSend, 0, MAX); // clear the buffer
-					snprintf(messageToSend, MAX, "Welcome to the server. Enter `n <your name>` to join the chat\n");
-					write(newsockfd, messageToSend, MAX);
 				}
 
 			}
 
-			/* Read from the rest of the ready sockets */
-			struct client *cliToRemove = NULL;
+			/* Reading messages*/
+			cliToRemove = NULL;
 			LIST_FOREACH(cli, &clientHead, entries) {
 				if (FD_ISSET(cli->sock, &readset)) {
 					/* Read the message */
-					if (read(cli->sock, s, MAX) <= 0) {
-						/* Something went wrong / Client has disconnected */
-						cliToRemove = cli;
-
-						/* Notify everyone that the client has disconnected if the client has a name */
-						if (cli->has_name) {
-							snprintf(messageToSend, MAX, "%s has left the chat\n", cli->name);
-							LIST_FOREACH(innerCli, &clientHead, entries) {
-								write(innerCli->sock, messageToSend, MAX);
-							}
-						}
-					} else {
-						/* There is a valid message, proccess it */
-						if (sscanf(s, "%c %[^\n]", &command, message) != 2) {
-							memset(messageToSend, 0, MAX); // clear the buffer
-							snprintf(messageToSend, MAX, "Bad format\n");
-							write(cli->sock, messageToSend, MAX);
+					if (n = read(cli->sock, cli->frptr, &(cli->fr[MAX])) < 0) {
+						if (errno != EWOULDBLOCK) {
+							perror("read error on socket");
+							cliToRemove = cli;
 							break;
 						}
-						switch(command) { // First character gives the purpose of the message
+					} else if (0 == n) {
+						fprintf(stderr, "%s:%d: EOF on socket\n", __FILE__, __LINE__);
+						if (cli->has_name) {
+							snprintf(messageToSend, MAX, "%s has left the chat", cli->name);
+
+							LIST_FOREACH(innerCli, &clientHead, entries) {
+								/* Dont send to current client and only tell people who are in the chat. */
+								if (innerCli->sock != cli->sock && innerCli->has_name) {
+									strncpy(innerCli->to, messageToSend, MAX);
+									innerCli->has_message_to_send = 1;
+								}
+							}
+						}
+						cliToRemove = cli;
+
+					/* There is something to be read now */
+					} else {						
+						cli->frptr += n;
+						if (cli->frptr < &(cli->fr[MAX])) {
+							// Don't proccess the message until it is fully read.
+							break;
+						}
+
+						/* Reset the frptr */
+						cli->frptr = cli->fr;
+
+						// The message should be fully read by now.
+						if (sscanf(cli->fr, "%c %[^\n]", &command, message) != 2) {
+							memset(messageToSend, 0, MAX); // clear the buffer
+							snprintf(messageToSend, MAX, "Bad format");
+							strncpy(cli->to, messageToSend, MAX);
+							cli->has_message_to_send = 1;
+							break;
+						}
+
+						switch(command) {
 
 							case 'n':
 								/* set or change name */
@@ -225,7 +248,8 @@ int main(int argc, char **argv)
 								if (isDuplicate) {
 									memset(messageToSend, 0, MAX); // clear the buffer
 									snprintf(messageToSend, MAX, "The name %s is already in the chat. Try Again\n", message);
-									write(cli->sock, messageToSend, MAX);
+									strncpy(cli->to, messageToSend, MAX);
+									cli->has_message_to_send = 1;
 									break;
 								}
 
@@ -244,16 +268,21 @@ int main(int argc, char **argv)
 										snprintf(messageToSend, MAX, "Hello %s, You are the first user to join the chat\n", message);
 									} else {
 										snprintf(messageToSend, MAX, "Hello %s, You are the only user in the chat\n", message);
-									}
-									write(cli->sock, messageToSend, MAX);
+									}									
+									strncpy(cli->to, messageToSend, MAX);
+									cli->has_message_to_send = 1;
 
 								} else {
-									/* The user is not the first tell everyone they have joined. */
-									snprintf(messageToSend, MAX, "%s has joined the chat\n", message);
+									if (cli->has_name) {
+										snprintf(messageToSend, MAX, "%s has changed name to %s", cli->name, message);
+									} else {
+										snprintf(messageToSend, MAX, "%s has joined the chat", message);
+									}
 									LIST_FOREACH(innerCli, &clientHead, entries) {
-										/* Dont send to current client */
-										if (innerCli->sock != cli->sock) {
-											write(innerCli->sock, messageToSend, MAX);
+										/* Dont send to current client and only tell people who are in the chat. */
+										if (innerCli->sock != cli->sock && innerCli->has_name) {
+											strncpy(innerCli->to, messageToSend, MAX);
+											innerCli->has_message_to_send = 1;
 										}
 									}
 								}
@@ -267,15 +296,18 @@ int main(int argc, char **argv)
 									/* The client has not yet fully joined. */
 									memset(messageToSend, 0, MAX); // clear the buffer
 									snprintf(messageToSend, MAX, "You must first enter a name to chat! (`n <name>`)\n");
-									write(cli->sock, messageToSend, MAX);
+									strncpy(cli->to, messageToSend, MAX);
+									cli->has_message_to_send = 1;
 									break;
 								}
+
 								/* send the received message to all clients */
 								memset(messageToSend, 0, MAX); // clear the buffer
 								snprintf(messageToSend, MAX, "%s: %s", cli->name, message); // If name is long then the message will get cut off. Only 100 characters are possible to send here.
 								LIST_FOREACH(innerCli, &clientHead, entries) {
 									if (innerCli->sock != cli->sock) {
-										write(innerCli->sock, messageToSend, MAX);
+										strncpy(innerCli->to, messageToSend, MAX);
+										innerCli->has_message_to_send = 1;
 									}
 								}
 								break;
@@ -283,12 +315,37 @@ int main(int argc, char **argv)
 							default:
 								memset(messageToSend, 0, MAX); // clear the buffer
 								snprintf(messageToSend, MAX, "%c is not a valid option\n", command);
-								write(cli->sock, messageToSend, MAX);
+								strncpy(cli->to, messageToSend, MAX);
+								cli->has_message_to_send = 1;
 								break;
 						}
 					}
 				}
 			}
+
+			/* Sending messages*/
+			LIST_FOREACH(cli, &clientHead, entries) {
+				if (FD_ISSET(cli->sock, &writeset) && cli->has_message_to_send) {
+					if ( (n = write(cli->sock, cli->toptr, MAX)) < 0) {
+						if (errno != EWOULDBLOCK) {
+							perror("read error on socket");
+							cliToRemove = cli;
+							break;
+						}
+					/* There is a valid message */
+					} else {
+						cli->toptr += n;
+						if (cli->toptr >= &(cli->to[MAX])) {
+							// Reset the to buffer after writing it all.
+							cli->toptr = cli->to;
+							cli->has_message_to_send = 0;
+						}
+					}
+				}
+			}
+
+
+
 			/* can't remove a list element in the LIST_FOREACH (Known bug) */
 			if (cliToRemove != NULL) {
 				close(cliToRemove->sock);

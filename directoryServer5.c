@@ -103,12 +103,12 @@ int main()
 
 			}
 
-			/* Read from the rest of the ready sockets */
+			/* Reading messages from the ready sockets */
 			servToRemove = NULL;
 			LIST_FOREACH(serv, &servHead, entries) {
 				if (FD_ISSET(serv->sock, &readset)) {
 					/* Read the message */
-					if (n = (read(serv->sock, serv->frptr, &(serv->fr[MAX]) - serv->frptr)) < 0) {
+					if ( (n = read(serv->sock, serv->frptr, &(serv->fr[MAX]) - serv->frptr)) < 0) {
 						if (errno != EWOULDBLOCK) {
 							perror("read error on socket");
 							servToRemove = serv;
@@ -133,8 +133,8 @@ int main()
 						/* Reset the frptr */
 						serv->frptr = serv->fr;
 
-						j = sscanf(s, "%c %hu %[^\n]", &command, &port, message);
-						printf("message from connection: %s\n", message);
+						j = sscanf(serv->frptr, "%c %hu %[^\n]", &command, &port, message);
+						printf("message from connection: %s, j: %d\n", serv->frptr, j);
 
 						memset(messageToSend, 0, MAX); // clear the buffer
 						// Check for formatting issues

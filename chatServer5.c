@@ -89,13 +89,26 @@ int main(int argc, char **argv) {
 	// int val = fcntl(sockfd, F_GETFL, 0);
 	// fcntl(sockfd, F_SETFL, val | O_NONBLOCK);
 
-	write(sockfd, messageToSend, MAX);
-	if (read(sockfd, s, MAX) < 0) {
-		perror("Failed to read verification from server: 1");
-		exit(1);
+	FD_ZERO(&readset); FD_ZERO(&writeset);
+	FD_SET(sockfd, &writeset);
+
+	if (n = select(sockfd+1, NULL, &writeset, NULL, NULL) > 0) {
+		write(sockfd, messageToSend, MAX);
+		printf("Sending: %s\n", messageToSend);
 	}
 
+
+	FD_ZERO(&readset); FD_ZERO(&writeset);
+	FD_SET(sockfd, &readset);
+	// if (n = select(sockfd+1, &readset, NULL, NULL, NULL) > 0) {
+	// 	if (read(sockfd, s, MAX) < 0) {
+	// 		perror("Failed to read verification from server: 1");
+	// 		exit(1);
+	// 	}
+	// }
+
 	// Get verification from directory that registering was successfull
+	printf("waiting\n");
 	select(sockfd, &readset, NULL, NULL, NULL);
 	if (n = (read(sockfd, s, MAX)) < 0) {
 		if (errno != EWOULDBLOCK) {

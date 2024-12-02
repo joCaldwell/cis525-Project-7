@@ -10,8 +10,9 @@
 #include "common.h"
 
 struct server{
-	char 				topic[MAX];
-	int 				sock, has_topic;
+	char 				topic[MAX], to[MAX], fr[MAX];
+	char 				*toptr, *frptr;
+	int 				sock, has_topic, has_message_to_send;
 	struct sockaddr_in 	serv_addr;
 	uint16_t 			port;
 	LIST_ENTRY(server) 	entries;
@@ -19,14 +20,14 @@ struct server{
 
 int main()
 {
-	int							sockfd, newsockfd, j;
+	int							sockfd, newsockfd, j, n;
 	uint16_t 					port;
 	unsigned int				servlen;
 	char						command, s[MAX], messageToSend[MAX], message[MAX];
 	LIST_HEAD(serv_list,server) servHead;
-	fd_set 						readset;
+	fd_set 						readset, writeset;
 	struct sockaddr_in 			cli_addr, serv_addr, dir_serv_addr;
-	struct server 				*serv, *innerServ;	
+	struct server 				*serv, *innerServ, *servToRemove;
 
 	/* Initialze the list of servers */
 	LIST_INIT(&servHead);
@@ -62,69 +63,96 @@ int main()
 
 	listen(sockfd, 5);
 
-	servlen = sizeof(serv_addr);
-
 	for (;;) {
-		FD_ZERO(&readset);
+		FD_ZERO(&readset); FD_ZERO(&writeset);
 		/* Set the listening socket in the readset */
 		FD_SET(sockfd, &readset);
 		/* Set the open clients in the readset */
 		int maxSockNum = sockfd;
 		LIST_FOREACH(serv, &servHead, entries) {
 			FD_SET(serv->sock, &readset);
+			FD_SET(serv->sock, &writeset);
 			if (serv->sock > maxSockNum) maxSockNum = serv->sock;
 		}
 
 		/* Select statement (hangs until a socket is ready) */
-		if ((j = select(maxSockNum+1, &readset, NULL, NULL, NULL)) > 0){ 
+		if ((j = select(maxSockNum+1, &readset, &writeset, NULL, NULL)) > 0){ 
+
 			/* Check if the listening socket can be read */
 			if (FD_ISSET(sockfd, &readset)) {
 				/* accept the connection */
-				servlen = sizeof(cli_addr);
+				servlen = sizeof(serv_addr);
 				if ((newsockfd = accept(sockfd, (struct sockaddr *) &serv_addr, &servlen)) < 0) {
 					/* something bad happend in the connection. Don't create client */
 				} else {
+					/* Set socket to non blocking */
+					int val = fcntl(newsockfd, F_GETFL, 0);
+					fcntl(newsockfd, F_SETFL, val | O_NONBLOCK);
+
 					/* add the socket to the client list */
 					struct server *newServ = malloc(sizeof(struct server));
 					memset(newServ->topic, '\0', MAX);
 					newServ->has_topic = 0;
+					newServ->has_message_to_send = 0;
 					newServ->sock = newsockfd;
 					newServ->serv_addr = serv_addr;
+					newServ->toptr = newServ->to;
+					newServ->frptr = newServ->fr;
 					LIST_INSERT_HEAD(&servHead, newServ, entries);
 				}
 
 			}
 
 			/* Read from the rest of the ready sockets */
-			struct server *servToRemove = NULL;
+			servToRemove = NULL;
 			LIST_FOREACH(serv, &servHead, entries) {
 				if (FD_ISSET(serv->sock, &readset)) {
 					/* Read the message */
-					if ((read(serv->sock, s, MAX)) <= 0) {
-						/* Something went wrong / Client has disconnected */
-						servToRemove = serv;
+					if (n = (read(serv->sock, serv->frptr, &(serv->fr[MAX]) - serv->frptr)) < 0) {
+						if (errno != EWOULDBLOCK) {
+							perror("read error on socket");
+							servToRemove = serv;
+							break;
+						}
+					} else if (0 == n) {
+						printf("here\n");
+						fprintf(stderr, "%s:%d: EOF on socket\n", __FILE__, __LINE__);
 						if (serv->has_topic) {
 							printf("Chat room %s has left.\n", serv->topic);
 						}
+						servToRemove = serv;
 
+					/* There is a valid message */
 					} else {
-						/* There is a valid message, proccess it */
+						serv->frptr += n;
+						if (serv->frptr < &(serv->fr[MAX])) {
+							// Don't proccess the message until it is fully read.
+							break;
+						}
+
+						/* Reset the frptr */
+						serv->frptr = serv->fr;
+
 						j = sscanf(s, "%c %hu %[^\n]", &command, &port, message);
+						printf("message from connection: %s\n", message);
 
 						memset(messageToSend, 0, MAX); // clear the buffer
 						// Check for formatting issues
 						if (j <= 0) {
 							snprintf(messageToSend, MAX, "f failed parsing");
-							write(serv->sock, messageToSend, MAX);
+							strncpy(serv->to, messageToSend, MAX);
+							serv->has_message_to_send = 1;
 							break;
 						} else if (j == 1 && command != 'c') {
 							// Only 1 char should be c, but it isn't here
 							snprintf(messageToSend, MAX, "f bad format (expected `c` got `%c`)", command);
-							write(serv->sock, messageToSend, MAX);
+							strncpy(serv->to, messageToSend, MAX);
+							serv->has_message_to_send = 1;
 							break;
 						} else if (j == 3 && command != 's') {
 							snprintf(messageToSend, MAX, "f bad format (expected `s <port> <topic>` got `%c %hu %s`)", command, port, message);
-							write(serv->sock, messageToSend, MAX);
+							strncpy(serv->to, messageToSend, MAX);
+							serv->has_message_to_send = 1;
 							break;
 						}
 						switch(command) { // Command tells us if it is a client or server
@@ -142,7 +170,8 @@ int main()
 
 								if (duplicate) {
 									snprintf(messageToSend, MAX, "f A server already has the name: %s", message);
-									write(serv->sock, messageToSend, MAX);
+									strncpy(serv->to, messageToSend, MAX);
+									serv->has_message_to_send = 1;
 									break;
 								}
 
@@ -154,7 +183,8 @@ int main()
 								// Tell the server that the process was successful
 								memset(messageToSend, 0, MAX); // clear the buffer
 								snprintf(messageToSend, MAX, "s");
-								write(serv->sock, messageToSend, MAX);
+								strncpy(serv->to, messageToSend, MAX);
+								serv->has_message_to_send = 1;
 								break;
 
 							case 'c':
@@ -164,9 +194,11 @@ int main()
 										/* innerServ is a registered chat room */
 										memset(messageToSend, 0, MAX); // clear the buffer
 										snprintf(messageToSend, MAX, "%s %hu %s", inet_ntoa(serv_addr.sin_addr), innerServ->port, innerServ->topic);
-										write(serv->sock, messageToSend, MAX);
+										strncpy(serv->to, messageToSend, MAX);
+										serv->has_message_to_send = 1;
 									}
 								}
+
 								/* Remove the client from the directory server because it is not a chat room */
 								servToRemove = serv;
 								break;
@@ -174,21 +206,43 @@ int main()
 							default:
 								memset(messageToSend, 0, MAX); // clear the buffer
 								snprintf(messageToSend, MAX, "%c is not a valid option\n", command);
-								write(serv->sock, messageToSend, MAX);
+								strncpy(serv->to, messageToSend, MAX);
+								serv->has_message_to_send = 1;
 								break;
+						}
+					}
+				}
+			}
+
+			/* Sending messages*/
+			LIST_FOREACH(serv, &servHead, entries) {
+				if (FD_ISSET(serv->sock, &writeset) && serv->has_message_to_send) {
+					printf("message: %s\n", serv->to);	
+					if ( (n = write(serv->sock, serv->toptr, MAX)) < 0) {
+						if (errno != EWOULDBLOCK) {
+							perror("write error on socket");
+							servToRemove = serv;
+							break;
+						}
+					/* a valid message was sent */
+					} else {
+						serv->toptr += n;
+						if (serv->toptr >= &(serv->to[MAX])) {
+							// Reset the to buffer after writing it all.
+							serv->toptr = serv->to;
+							serv->has_message_to_send = 0;
 						}
 					}
 				}
 			}
 			/* can't remove a list element in the LIST_FOREACH (Known bug) */
 			if (servToRemove != NULL) {
-				/* Remove the client from the list */
+				/* Remove the server from the list */
 				close(servToRemove->sock);
 				LIST_REMOVE(servToRemove, entries);
 				/* Free the memory for the server */
 				free(servToRemove);
 			}
-
 		}
 	}
 	/* Cleanup */

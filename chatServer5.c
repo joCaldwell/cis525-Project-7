@@ -16,8 +16,7 @@ struct client {
 	LIST_ENTRY(client) 	entries;
 };
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
 	char							command, s[MAX], topic[MAX], message[MAX], messageToSend[MAX];
 	int								sockfd, newsockfd, n, j;
 	uint16_t						port;
@@ -84,25 +83,46 @@ int main(int argc, char **argv)
 	/* Send port number and topic to the directory server to register it */
 	memset(messageToSend, 0, MAX); // clear the buffer
 	snprintf(messageToSend, MAX, "s %hu %s", port, topic);
+
+	/// THIS WAS NOT WORKING.
+	/* Set socket to non blocking */
+	// int val = fcntl(sockfd, F_GETFL, 0);
+	// fcntl(sockfd, F_SETFL, val | O_NONBLOCK);
+
 	write(sockfd, messageToSend, MAX);
-	// Get verification from directory that registering was successfull
 	if (read(sockfd, s, MAX) < 0) {
-		perror("Failed to read verification from server");
+		perror("Failed to read verification from server: 1");
 		exit(1);
+	}
+
+	// Get verification from directory that registering was successfull
+	select(sockfd, &readset, NULL, NULL, NULL);
+	if (n = (read(sockfd, s, MAX)) < 0) {
+		if (errno != EWOULDBLOCK) {
+			perror("read error from dirctory");
+			exit(1);
+		}
+	} else if (0 == n) {
+		fprintf(stderr, "%s:%d: EOF on socket\n", __FILE__, __LINE__);
+	} else {
+		// Should be good to go
 	}
 
 	memset(message, 0, MAX); // clear the buffer
 	// Check message from Directory server (first char 's': success, 'f': fail)
 	j = sscanf(s, "%c %[^\n]", &command, message);
 	if (j <= 0) {
-		perror("Failed to read verification from server");
+		perror("Failed to read verification from server: 2");
 		exit(1);
+
 	} else if (j == 1) {
 		// Only one character was sent, if it was 's' then verification was successful
 		if (command != 's') {
-			perror("Failed to read verification from server");
+			perror("Failed to read verification from server: 3");
+			printf("commnad: %c\n", command);
 			exit(1);
 		}
+
 	} else if (j == 2) {
 		// Both arguments were supplied, check the values
 		if (command == 'f') {
@@ -110,7 +130,7 @@ int main(int argc, char **argv)
 			printf("%s\n", message);
 			exit(1);
 		} else if (command != 's') {
-			perror("Failed to read verification from server");
+			perror("Failed to read verification from server: 4");
 			exit(1);
 		}
 	}
@@ -124,7 +144,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Add SO_REAUSEADDR option to prevent address in use errors (modified from: "Hands-On Network
-* Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
+	* Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
 	true = 1;
 	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (void *)&true, sizeof(true)) < 0) {
 		perror("server: can't set stream socket address reuse option");
@@ -332,7 +352,7 @@ int main(int argc, char **argv)
 							cliToRemove = cli;
 							break;
 						}
-					/* There is a valid message */
+					/* valid message was sent */
 					} else {
 						cli->toptr += n;
 						if (cli->toptr >= &(cli->to[MAX])) {

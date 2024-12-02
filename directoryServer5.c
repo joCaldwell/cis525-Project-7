@@ -134,7 +134,6 @@ int main()
 						serv->frptr = serv->fr;
 
 						j = sscanf(serv->frptr, "%c %hu %[^\n]", &command, &port, message);
-						printf("message from connection: %s, j: %d\n", serv->frptr, j);
 
 						memset(messageToSend, 0, MAX); // clear the buffer
 						// Check for formatting issues
@@ -217,7 +216,6 @@ int main()
 			/* Sending messages*/
 			LIST_FOREACH(serv, &servHead, entries) {
 				if (FD_ISSET(serv->sock, &writeset) && serv->has_message_to_send) {
-					printf("message: %s\n", serv->to);	
 					if ( (n = write(serv->sock, serv->toptr, MAX)) < 0) {
 						if (errno != EWOULDBLOCK) {
 							perror("write error on socket");

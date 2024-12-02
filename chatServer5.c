@@ -84,10 +84,9 @@ int main(int argc, char **argv) {
 	memset(messageToSend, 0, MAX); // clear the buffer
 	snprintf(messageToSend, MAX, "s %hu %s", port, topic);
 
-	/// THIS WAS NOT WORKING.
 	/* Set socket to non blocking */
-	// int val = fcntl(sockfd, F_GETFL, 0);
-	// fcntl(sockfd, F_SETFL, val | O_NONBLOCK);
+	int val = fcntl(sockfd, F_GETFL, 0);
+	fcntl(sockfd, F_SETFL, val | O_NONBLOCK);
 
 	FD_ZERO(&readset); FD_ZERO(&writeset);
 	FD_SET(sockfd, &writeset);
@@ -98,18 +97,11 @@ int main(int argc, char **argv) {
 	}
 
 
+	// Get verification from directory that registering was successfull
 	FD_ZERO(&readset); FD_ZERO(&writeset);
 	FD_SET(sockfd, &readset);
-	// if (n = select(sockfd+1, &readset, NULL, NULL, NULL) > 0) {
-	// 	if (read(sockfd, s, MAX) < 0) {
-	// 		perror("Failed to read verification from server: 1");
-	// 		exit(1);
-	// 	}
-	// }
 
-	// Get verification from directory that registering was successfull
-	printf("waiting\n");
-	select(sockfd, &readset, NULL, NULL, NULL);
+	select(sockfd+1, &readset, NULL, NULL, NULL);
 	if (n = (read(sockfd, s, MAX)) < 0) {
 		if (errno != EWOULDBLOCK) {
 			perror("read error from dirctory");
@@ -212,6 +204,7 @@ int main(int argc, char **argv) {
 					newCli->toptr = newCli->to;
 					newCli->frptr = newCli->fr;
 					LIST_INSERT_HEAD(&clientHead, newCli, entries);
+					printf("Client Connected\n");
 				}
 
 			}
@@ -261,6 +254,7 @@ int main(int argc, char **argv) {
 							cli->has_message_to_send = 1;
 							break;
 						}
+						printf("message from cli: %s\n", cli->frptr);
 
 						switch(command) {
 

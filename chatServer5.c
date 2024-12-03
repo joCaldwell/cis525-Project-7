@@ -93,7 +93,6 @@ int main(int argc, char **argv) {
 
 	if (n = select(sockfd+1, NULL, &writeset, NULL, NULL) > 0) {
 		write(sockfd, messageToSend, MAX);
-		printf("Sending: %s\n", messageToSend);
 	}
 
 
@@ -102,6 +101,7 @@ int main(int argc, char **argv) {
 	FD_SET(sockfd, &readset);
 
 	select(sockfd+1, &readset, NULL, NULL, NULL);
+	memset(s, 0, MAX); // clear the buffer
 	if (n = (read(sockfd, s, MAX)) < 0) {
 		if (errno != EWOULDBLOCK) {
 			perror("read error from dirctory");
@@ -124,7 +124,6 @@ int main(int argc, char **argv) {
 		// Only one character was sent, if it was 's' then verification was successful
 		if (command != 's') {
 			perror("Failed to read verification from server: 3");
-			printf("commnad: %c\n", command);
 			exit(1);
 		}
 
@@ -132,7 +131,6 @@ int main(int argc, char **argv) {
 		// Both arguments were supplied, check the values
 		if (command == 'f') {
 			// Verifiaction failed print error message from directory
-			printf("%s\n", message);
 			exit(1);
 		} else if (command != 's') {
 			perror("Failed to read verification from server: 4");
@@ -214,7 +212,7 @@ int main(int argc, char **argv) {
 			LIST_FOREACH(cli, &clientHead, entries) {
 				if (FD_ISSET(cli->sock, &readset)) {
 					/* Read the message */
-					if (n = read(cli->sock, cli->frptr, &(cli->fr[MAX])) < 0) {
+					if ( (n = read(cli->sock, cli->frptr, &(cli->fr[MAX]) - cli->frptr)) < 0) {
 						if (errno != EWOULDBLOCK) {
 							perror("read error on socket");
 							cliToRemove = cli;
@@ -254,7 +252,6 @@ int main(int argc, char **argv) {
 							cli->has_message_to_send = 1;
 							break;
 						}
-						printf("message from cli: %s\n", cli->frptr);
 
 						switch(command) {
 

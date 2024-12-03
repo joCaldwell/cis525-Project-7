@@ -115,7 +115,6 @@ int main()
 							break;
 						}
 					} else if (0 == n) {
-						printf("here\n");
 						fprintf(stderr, "%s:%d: EOF on socket\n", __FILE__, __LINE__);
 						if (serv->has_topic) {
 							printf("Chat room %s has left.\n", serv->topic);

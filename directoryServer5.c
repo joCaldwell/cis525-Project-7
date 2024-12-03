@@ -12,7 +12,7 @@
 struct server{
 	char 				topic[MAX], to[MAX], fr[MAX];
 	char 				*toptr, *frptr;
-	int 				sock, has_topic, has_message_to_send;
+	int 				sock, has_topic, has_message_to_send, send_servers_list;
 	struct sockaddr_in 	serv_addr;
 	uint16_t 			port;
 	LIST_ENTRY(server) 	entries;
@@ -94,6 +94,7 @@ int main()
 					memset(newServ->topic, '\0', MAX);
 					newServ->has_topic = 0;
 					newServ->has_message_to_send = 0;
+					newServ->send_servers_list = 0;
 					newServ->sock = newsockfd;
 					newServ->serv_addr = serv_addr;
 					newServ->toptr = newServ->to;
@@ -178,6 +179,8 @@ int main()
 								serv->has_topic = 1;
 								serv->port = port;
 
+								fprintf(stderr, "%s:%d: server topic `%s` is regestered on port %d\n", __FILE__, __LINE__, serv->topic, serv->port);
+
 								// Tell the server that the process was successful
 								memset(messageToSend, 0, MAX); // clear the buffer
 								snprintf(messageToSend, MAX, "s");
@@ -188,14 +191,17 @@ int main()
 							case 'c':
 								/* Client, give list of servers */
 								LIST_FOREACH(innerServ, &servHead, entries) {
-									if (innerServ->sock != serv->sock && innerServ->has_topic) {
-										/* innerServ is a registered chat room */
-										memset(messageToSend, 0, MAX); // clear the buffer
-										snprintf(messageToSend, MAX, "%s %hu %s", inet_ntoa(serv_addr.sin_addr), innerServ->port, innerServ->topic);
-										strncpy(serv->to, messageToSend, MAX);
-										serv->has_message_to_send = 1;
-									}
+									// if (innerServ->sock != serv->sock && innerServ->has_topic) {
+									// 	printf("Sending server %s to client\n", innerServ->topic);
+									// 	/* innerServ is a registered chat room */
+									// 	memset(messageToSend, 0, MAX); // clear the buffer
+									// 	snprintf(messageToSend, MAX, "%s %hu %s", inet_ntoa(serv_addr.sin_addr), innerServ->port, innerServ->topic);
+									// 	strncpy(serv->to, messageToSend, MAX);
+									// 	serv->has_message_to_send = 1;
+									// }
 								}
+								serv->has_message_to_send = 1;
+								serv->send_servers_list = 1;
 
 								/* Remove the client from the directory server because it is not a chat room */
 								servToRemove = serv;
@@ -215,19 +221,35 @@ int main()
 			/* Sending messages*/
 			LIST_FOREACH(serv, &servHead, entries) {
 				if (FD_ISSET(serv->sock, &writeset) && serv->has_message_to_send) {
-					if ( (n = write(serv->sock, serv->toptr, MAX)) < 0) {
-						if (errno != EWOULDBLOCK) {
-							perror("write error on socket");
-							servToRemove = serv;
-							break;
+					// SEND TO CLIENT
+					if (serv->send_servers_list) {
+						LIST_FOREACH(innerServ, &servHead, entries) {
+							if (innerServ->sock != serv->sock && innerServ->has_topic) {
+								printf("Sending server %s to client\n", innerServ->topic);
+								/* innerServ is a registered chat room */
+								memset(messageToSend, 0, MAX); // clear the buffer
+								snprintf(messageToSend, MAX, "%s %hu %s", inet_ntoa(serv_addr.sin_addr), innerServ->port, innerServ->topic);
+								write(serv->sock, messageToSend, MAX);
+							}
 						}
-					/* a valid message was sent */
+						serv->has_message_to_send = 0;
+						serv->send_servers_list = 0;
+					// SEND TO SERVER
 					} else {
-						serv->toptr += n;
-						if (serv->toptr >= &(serv->to[MAX])) {
-							// Reset the to buffer after writing it all.
-							serv->toptr = serv->to;
-							serv->has_message_to_send = 0;
+						if ( (n = write(serv->sock, serv->toptr, MAX)) < 0) {
+							if (errno != EWOULDBLOCK) {
+								perror("write error on socket");
+								servToRemove = serv;
+								break;
+							}
+						/* a valid message was sent */
+						} else {
+							serv->toptr += n;
+							if (serv->toptr >= &(serv->to[MAX])) {
+								// Reset the to buffer after writing it all.
+								serv->toptr = serv->to;
+								serv->has_message_to_send = 0;
+							}
 						}
 					}
 				}

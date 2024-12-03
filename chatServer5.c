@@ -88,29 +88,42 @@ int main(int argc, char **argv) {
 	int val = fcntl(sockfd, F_GETFL, 0);
 	fcntl(sockfd, F_SETFL, val | O_NONBLOCK);
 
-	FD_ZERO(&readset); FD_ZERO(&writeset);
-	FD_SET(sockfd, &writeset);
 
-	if (n = select(sockfd+1, NULL, &writeset, NULL, NULL) > 0) {
-		write(sockfd, messageToSend, MAX);
+	for (;;) {
+		FD_ZERO(&readset); FD_ZERO(&writeset);
+		FD_SET(sockfd, &writeset);
+		if (n = select(sockfd+1, NULL, &writeset, NULL, NULL) > 0) {
+			if ( (n = write(sockfd, messageToSend, MAX)) < 0) {
+				if (errno != EWOULDBLOCK) {
+					perror("read error on socket");
+					cliToRemove = cli;
+					break;
+				}
+			} else {
+				// We have written something, break the loop
+				break;
+			}
+			// write(sockfd, messageToSend, MAX);
+		}
 	}
 
 
 	// Get verification from directory that registering was successfull
-	FD_ZERO(&readset); FD_ZERO(&writeset);
-	FD_SET(sockfd, &readset);
 
-	select(sockfd+1, &readset, NULL, NULL, NULL);
 	memset(s, 0, MAX); // clear the buffer
-	if (n = (read(sockfd, s, MAX)) < 0) {
-		if (errno != EWOULDBLOCK) {
-			perror("read error from dirctory");
-			exit(1);
+	for (;;) {
+		FD_ZERO(&readset); FD_ZERO(&writeset);
+		FD_SET(sockfd, &readset);
+		select(sockfd+1, &readset, NULL, NULL, NULL);
+		if (n = (read(sockfd, s, MAX)) < 0) {
+			if (errno != EWOULDBLOCK) {
+				perror("read error from dirctory");
+				exit(1);
+			}
+		} else {
+			// We have read something, Verify the message after.
+			break;
 		}
-	} else if (0 == n) {
-		fprintf(stderr, "%s:%d: EOF on socket\n", __FILE__, __LINE__);
-	} else {
-		// Should be good to go
 	}
 
 	memset(message, 0, MAX); // clear the buffer

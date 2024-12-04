@@ -6,6 +6,9 @@
 #include <sys/select.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <openssl/ssl.h>
+#include <openssl/bio.h>
+#include <openssl/err.h>
 #include "inet.h"
 #include "common.h"
 

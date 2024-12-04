@@ -1,3 +1,7 @@
+#include <openssl/ssl.h>
+#include <openssl/bio.h>
+#include <openssl/x509.h>
+#include <openssl/err.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -9,7 +13,6 @@
 #include <string.h>
 #include "inet.h"
 #include "common.h"
-
 
 struct server{
 	char 				topic[MAX], ip[20];
@@ -32,6 +35,37 @@ int main()
 	struct server 		*serv, *innerServ;
 
 	LIST_INIT(&servHead);
+
+	/* openssl stuff */
+	SSL_library_init();
+	OpenSSL_add_all_algorithms();
+	SSL_load_error_strings();
+
+	SSL_CTX *ctx;
+	SSL *ssl;
+	BIO *bio;
+	const char *ca_cert_file = "ca.crt";
+
+	const SSL_METHOD *method = TLS_client_method();
+	ctx = SSL_CTX_new(method);
+
+	if (!ctx) {
+		fprintf(stderr, "Error creating SSL context\n");
+		exit(1);
+	}
+
+	// Load CA certificate to verify the server's certificate
+	if (SSL_CTX_load_verify_locations(ctx, ca_cert_file, NULL) <= 0) {
+		fprintf(stderr, "Error loading CA certificate\n");
+		exit(1);
+	}
+
+	/* Do this to connect to server / direcotry */
+	// // Create a new SSL structure
+	// ssl = SSL_new(ctx);
+	// bio = BIO_new_connect("server_address:4433");
+	// SSL_set_bio(ssl, bio, bio);
+
 
 	/* Set up the address of the directory server to be contacted. */
 	memset((char *) &dir_serv_addr, 0, sizeof(dir_serv_addr));

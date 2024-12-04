@@ -9,7 +9,7 @@ DEPS		= $(INCLUDES)
 OBJECTS	= $(SOURCES:.c=.o)
 OBJECTS	+= $(SOURCES:.c=.dSYM*)
 EXTRAS	= $(SOURCES:.c=.exe*)
-LIBS		=
+LIBS	= -lssl -lcrypto
 LDFLAGS	=
 CFLAGS	= -g -ggdb -std=c99 -Wmain \
 				-Wignored-qualifiers -Wshift-negative-value \
@@ -21,7 +21,7 @@ CFLAGS	= -g -ggdb -std=c99 -Wmain \
 				-Wuninitialized -Wswitch-default -Wfatal-errors
 CFLAGS	+= -ggdb3
 CFLAGS	+= -Wformat-security -Wconversion -Wformat-overflow=2 -Wformat-signedness
-# CFLAGS += -Wc99-c11-compat -Wmaybe-uninitialized \
+CFLAGS += -Wc99-c11-compat -Wmaybe-uninitialized \
 					-Wformat-truncation=2 -Wstringop-truncation \
 					-Wformat-overflow=2 -Wformat-signedness
 
@@ -31,13 +31,13 @@ chat2:	$(EXECUTABLES)
 
 
 chatClient5: chatClient5.c $(DEPS)
-	$(CC) $(LDFLAGS) $(CFLAGS) $(LIBS) -o $@ $<
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $< -lssl -lcrypto
 
 chatServer5: chatServer5.c $(DEPS)
-	$(CC) $(LDFLAGS) $(CFLAGS) $(LIBS) -o $@ $<
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $< -lssl -lcrypto
 
 directoryServer5: directoryServer5.c $(DEPS)
-	$(CC) $(LDFLAGS) $(CFLAGS) $(LIBS) -o $@ $<
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $< -lssl -lcrypto
 
 
 # Clean up the mess we made

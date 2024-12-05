@@ -1,7 +1,7 @@
-#include <openssl/ssl.h>
-#include <openssl/bio.h>
-#include <openssl/x509.h>
-#include <openssl/err.h>
+#include "openssl/ssl.h"
+#include "openssl/bio.h"
+#include "openssl/x509.h"
+#include "openssl/err.h"
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -13,6 +13,8 @@
 #include <string.h>
 #include "inet.h"
 #include "common.h"
+
+// install : sudo apt-get install libssl-dev
 
 struct server{
 	char 				topic[MAX], ip[20];
@@ -29,10 +31,13 @@ int main()
 	ssize_t				nread;
 	struct sockaddr_in 	serv_addr, dir_serv_addr;
 	struct timeval 		timeout;
-	char				topic[MAX], ip[20];
+	char				topic[MAX], ip[20], expected_cn[MAX], server_cn[MAX];
 	uint16_t			port;
 	LIST_HEAD(server_list, server) servHead;
 	struct server 		*serv, *innerServ;
+	X509_NAME			*subject_name;
+	X509				* cert;
+
 
 	LIST_INIT(&servHead);
 
@@ -44,27 +49,140 @@ int main()
 	SSL_CTX *ctx;
 	SSL *ssl;
 	BIO *bio;
-	const char *ca_cert_file = "ca.crt";
 
+	const char *ca_cert_file = "certs/ca-cert.pem";
 	const SSL_METHOD *method = TLS_client_method();
 	ctx = SSL_CTX_new(method);
+
 
 	if (!ctx) {
 		fprintf(stderr, "Error creating SSL context\n");
 		exit(1);
 	}
 
+
+	// Prepare folder formatting loading certs */
+	/* Use this at the command line */
+	/* c_rehash "/../certs" */
+
+
 	// Load CA certificate to verify the server's certificate
 	if (SSL_CTX_load_verify_locations(ctx, ca_cert_file, NULL) <= 0) {
-		fprintf(stderr, "Error loading CA certificate\n");
+		fprintf(stderr, "Error loading CA certificate: 1\n");
+		SSL_CTX_free(ctx);
 		exit(1);
 	}
 
 	/* Do this to connect to server / direcotry */
-	// // Create a new SSL structure
-	// ssl = SSL_new(ctx);
-	// bio = BIO_new_connect("server_address:4433");
-	// SSL_set_bio(ssl, bio, bio);
+	// // Create a new SSL object
+	ssl = SSL_new(ctx);
+	if (ssl <= 0) {
+        fprintf(stderr, "BIO NULL\n");
+		SSL_CTX_free(ctx);
+		exit(1);
+    }
+
+
+	/* Creating an opening a connection */
+	bio = BIO_new_connect("127.0.0.1:4433"); 
+	if(bio == NULL)
+	{
+		fprintf(stderr, "Error creating bio object\n");
+		SSL_free(ssl);
+        SSL_CTX_free(ctx);
+		BIO_free_all(bio);
+		exit(1); 
+	}
+	
+	/* ssl, rbio, wbio */
+	SSL_set_bio(ssl, bio, bio);
+
+	//BIO_get_ssl(bio, &ssl);
+	SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
+
+
+	/* Reading from the connection 
+	int x = BIO_read(bio, buf, len);
+	if(x == 0)
+	{
+		// Handle closed connection /
+	}
+	else if(x < 0)
+	{
+	   if(! BIO_should_retry(bio))
+		{
+			// Handle failed read here /
+		}
+
+		/ Do something to handle the retry /
+	}
+
+
+	 Writing to the connection 
+	if(BIO_write(bio, buf, len) <= 0)
+	{
+		if(! BIO_should_retry(bio))
+		{
+			/ Handle failed write here /
+		}
+
+		/ Do something to handle the retry 
+	}*/
+
+
+	/* Connecting to server */
+	if(BIO_do_connect(bio) <= 0)
+	{
+		if(BIO_should_retry(bio) <= 0){
+			fprintf(stderr, "Error establishing connection");
+			SSL_free(ssl);
+			SSL_CTX_free(ctx);
+			BIO_free_all(bio);
+			exit(1);
+		}
+	}
+
+
+	if(SSL_get_verify_result(ssl) != X509_V_OK)
+	{
+		fprintf(stderr, "Error verifying the CA");
+		exit(1);
+	}
+
+
+	/* Retreive cert from server */
+	cert = SSL_get_peer_certificate(ssl);
+
+    if (cert <= 0) {
+        fprintf(stderr, "No server certificate received\n");
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+		BIO_free_all(bio);
+        exit(1);
+    }
+
+
+	subject_name = X509_get_subject_name(cert);
+    if (subject_name <= 0) {
+        fprintf(stderr, "Failed to get subject name from certificate\n");
+        X509_free(cert);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        exit(1);
+    }
+	
+    if (X509_NAME_get_text_by_NID(subject_name, NID_commonName, server_cn, sizeof(server_cn)) <= 0) {
+        fprintf(stderr, "Error retrieving common name from cert\n");
+        X509_free(cert);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        exit(1);
+    }
+
+	// BIO_free_all()
+
+	/* Cleanup SSL */
+	//SSL_CTX_free(ctx);
 
 
 	/* Set up the address of the directory server to be contacted. */
@@ -79,11 +197,26 @@ int main()
 		exit(1);
 	}
 
+		// IMPLEMENT ME : still need retreive server info from server prior to acceptign the connection 
+	/* On connection check sever cn against expected cn */
+    if (strcmp(server_cn, expected_cn) != 0) {
+        fprintf(stderr, "Common Name mismatch: expected '%s', got '%s'\n", expected_cn, server_cn);
+        X509_free(cert);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        exit(1);
+    }
+
 	/* Connect to the dirctory server to get a list of chat rooms. */
 	if (connect(sockfd, (struct sockaddr *) &dir_serv_addr, sizeof(dir_serv_addr)) < 0) {
 		perror("client: can't connect to directory server");
 		exit(1);
 	} 
+
+
+	/* Free certificate */
+	X509_free(cert);
+
 
 	/* tell the directory server we are a client */
 	snprintf(s, MAX, "c");

@@ -22,6 +22,7 @@ struct server{
 	struct sockaddr_in 	serv_addr;
 	uint16_t 			port;
 	LIST_ENTRY(server) 	entries;
+	SSL 				*ssl;
 };
 
 int main()
@@ -35,7 +36,6 @@ int main()
 	struct sockaddr_in 			cli_addr, serv_addr, dir_serv_addr;
 	struct server 				*serv, *innerServ, *servToRemove;
 	SSL_CTX 					*ctx;
-	SSL 						*ssl;
 
 	/* Initialze the list of servers */
 	LIST_INIT(&servHead);
@@ -130,25 +130,26 @@ int main()
 					int val = fcntl(newsockfd, F_GETFL, 0);
 					fcntl(newsockfd, F_SETFL, val | O_NONBLOCK);
 
-					ssl = SSL_new(ctx);
-					SSL_set_fd(ssl, newsockfd);
+					/* create new server */
+					struct server *newServ = malloc(sizeof(struct server));
+
+					newServ->ssl = SSL_new(ctx);
+					SSL_set_fd(newServ->ssl, newsockfd);
 
 					/* SSL handshake with the server/client */
 					int handshake_result, err;
-					while ((handshake_result = SSL_accept(ssl)) <= 0) {
-						err = SSL_get_error(ssl, handshake_result);
+					while ((handshake_result = SSL_accept(newServ->ssl)) <= 0) {
+						err = SSL_get_error(newServ->ssl, handshake_result);
 						if ((err != SSL_ERROR_WANT_READ) && (err != SSL_ERROR_WANT_WRITE)) {
 							ERR_print_errors_fp(stderr);
 							close(newsockfd);
-							SSL_free(ssl);
+							SSL_free(newServ->ssl);
 							printf("Handshake failed\n");
 						}
 					}
 					printf("Handshake successful\n");
-					SSL_free(ssl);
 
-					/* add the socket to the client list */
-					struct server *newServ = malloc(sizeof(struct server));
+					/* initialize server variables */
 					memset(newServ->topic, '\0', MAX);
 					newServ->has_topic = 0;
 					newServ->has_message_to_send = 0;
@@ -157,6 +158,8 @@ int main()
 					newServ->serv_addr = serv_addr;
 					newServ->toptr = newServ->to;
 					newServ->frptr = newServ->fr;
+
+					/* add the socket to the client list */
 					LIST_INSERT_HEAD(&servHead, newServ, entries);
 				}
 
@@ -167,7 +170,7 @@ int main()
 			LIST_FOREACH(serv, &servHead, entries) {
 				if (FD_ISSET(serv->sock, &readset)) {
 					/* Read the message */
-					if ( (n = read(serv->sock, serv->frptr, &(serv->fr[MAX]) - serv->frptr)) < 0) {
+					if ( (n = SSL_read(serv->ssl, serv->frptr, &(serv->fr[MAX]) - serv->frptr)) < 0) {
 						if (errno != EWOULDBLOCK) {
 							perror("read error on socket");
 							servToRemove = serv;
@@ -287,7 +290,7 @@ int main()
 								/* innerServ is a registered chat room */
 								memset(messageToSend, 0, MAX); // clear the buffer
 								snprintf(messageToSend, MAX, "%s %hu %s", inet_ntoa(serv_addr.sin_addr), innerServ->port, innerServ->topic);
-								write(serv->sock, messageToSend, MAX);
+								SSL_write(serv->ssl, messageToSend, MAX);
 							}
 						}
 						serv->has_message_to_send = 0;

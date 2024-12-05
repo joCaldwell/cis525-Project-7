@@ -298,7 +298,7 @@ int main()
 						serv->send_servers_list = 0;
 					// SEND TO SERVER
 					} else {
-						if ( (n = write(serv->sock, serv->toptr, MAX)) < 0) {
+						if ( (n = SSL_write(serv->ssl, serv->toptr, MAX)) < 0) {
 							if (errno != EWOULDBLOCK) {
 								perror("write error on socket");
 								servToRemove = serv;

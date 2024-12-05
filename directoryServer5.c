@@ -12,6 +12,9 @@
 #include "inet.h"
 #include "common.h"
 
+#define DIRECTORY_SERVER_CERT "certs/directory-server-cert.crt"
+#define DIRECTORY_SERVER_KEY "certs/directory-server-key.pem"
+
 struct server{
 	char 				topic[MAX], to[MAX], fr[MAX];
 	char 				*toptr, *frptr;
@@ -31,9 +34,44 @@ int main()
 	fd_set 						readset, writeset;
 	struct sockaddr_in 			cli_addr, serv_addr, dir_serv_addr;
 	struct server 				*serv, *innerServ, *servToRemove;
+	SSL_CTX 					*ctx;
+	SSL 						*ssl;
 
 	/* Initialze the list of servers */
 	LIST_INIT(&servHead);
+
+	/* openssl initialization */
+	SSL_library_init();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
+    ERR_load_BIO_strings();
+
+    ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx) {
+        perror("Unable to create SSL context");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    // Load the server's certificate
+    if (SSL_CTX_use_certificate_file(ctx, DIRECTORY_SERVER_CERT, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+		perror("Error loading server certificate");
+        exit(EXIT_FAILURE);
+    }
+
+    // Load the server's private key
+    if (SSL_CTX_use_PrivateKey_file(ctx, DIRECTORY_SERVER_KEY, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+		perror("Error loading server private key");
+        exit(EXIT_FAILURE);
+    }
+
+    // Verify that the private key matches the certificate
+    if (!SSL_CTX_check_private_key(ctx)) {
+        fprintf(stderr, "Private key does not match the certificate\n");
+        exit(EXIT_FAILURE);
+    }
 
 	/* initialize server variables */
 	serv = malloc(sizeof(struct server));
@@ -91,6 +129,18 @@ int main()
 					/* Set socket to non blocking */
 					int val = fcntl(newsockfd, F_GETFL, 0);
 					fcntl(newsockfd, F_SETFL, val | O_NONBLOCK);
+
+					    ssl = SSL_new(ctx);
+						SSL_set_fd(ssl, newsockfd);
+
+						// Perform the SSL handshake with the client
+						if (SSL_accept(ssl) <= 0) {
+							perror("SSL handshake error");
+							ERR_print_errors_fp(stderr);
+						} else {
+							printf("SSL handshake successful\n");
+						}
+
 
 					/* add the socket to the client list */
 					struct server *newServ = malloc(sizeof(struct server));

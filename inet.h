@@ -15,4 +15,5 @@
 #define SERV_TCP_PORT 4433
 
 /* Change the following to be your host addr: 129.130.10.43 for viper and 129.130.10.39 for cougar */
-#define SERV_HOST_ADDR "127.0.0.1"
+// #define SERV_HOST_ADDR "127.0.0.1"
+#define SERV_HOST_ADDR "129.130.10.39"

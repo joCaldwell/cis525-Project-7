@@ -17,6 +17,7 @@ struct client {
 	char 				name[MAX], to[MAX], fr[MAX];
 	char				*toptr, *frptr;
 	int 				has_name, sock, has_message_to_send;
+	SSL					*ssl;
 	LIST_ENTRY(client) 	entries;
 };
 
@@ -33,6 +34,10 @@ int main(int argc, char **argv) {
 	char							expected_cn[MAX], server_cn[MAX];
 	X509_NAME						*subject_name;
 	X509							*cert;
+	SSL_CTX 						*ctx;
+	SSL 							*dir_ssl; 
+	BIO 							*bio;
+
 
 	/* Initialze the list of clients */
 	LIST_INIT(&clientHead);
@@ -47,10 +52,6 @@ int main(int argc, char **argv) {
 	SSL_library_init();
 	OpenSSL_add_all_algorithms();
 	SSL_load_error_strings();
-
-	SSL_CTX *ctx;
-	SSL *ssl; 
-	BIO *bio;
 
 	const SSL_METHOD *method = TLS_client_method();
 	ctx = SSL_CTX_new(method);
@@ -158,13 +159,13 @@ int main(int argc, char **argv) {
 	fcntl(sockfd, F_SETFL, val | O_NONBLOCK);
 
 	// Create an SSL object and bind it to the socket
-    ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, sockfd);
+    dir_ssl = SSL_new(ctx);
+    SSL_set_fd(dir_ssl, sockfd);
 
     // Initiate the handshake
 	int result;
-    while ((result = SSL_connect(ssl)) <= 0) {
-        int err = SSL_get_error(ssl, result);
+    while ((result = SSL_connect(dir_ssl)) <= 0) {
+        int err = SSL_get_error(dir_ssl, result);
         if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
 			continue;
         } else {
@@ -176,7 +177,7 @@ int main(int argc, char **argv) {
 	printf("SSL handshake successful\n");
 
 		/* Retreive cert from server */
-	cert = SSL_get_peer_certificate(ssl);
+	cert = SSL_get_peer_certificate(dir_ssl);
 
     if (cert <= 0) {
         fprintf(stderr, "No server certificate received\n");
@@ -213,7 +214,7 @@ int main(int argc, char **argv) {
 		FD_ZERO(&readset); FD_ZERO(&writeset);
 		FD_SET(sockfd, &writeset);
 		if (n = select(sockfd+1, NULL, &writeset, NULL, NULL) > 0) {
-			if ( (n = write(sockfd, messageToSend, MAX)) < 0) {
+			if ( (n = SSL_write(dir_ssl, messageToSend, MAX)) < 0) {
 				if (errno != EWOULDBLOCK) {
 					perror("read error on socket");
 					cliToRemove = cli;
@@ -235,7 +236,7 @@ int main(int argc, char **argv) {
 		FD_ZERO(&readset); FD_ZERO(&writeset);
 		FD_SET(sockfd, &readset);
 		select(sockfd+1, &readset, NULL, NULL, NULL);
-		if (n = (read(sockfd, s, MAX)) < 0) {
+		if ( (n = SSL_read(dir_ssl, s, MAX)) < 0) {
 			if (errno != EWOULDBLOCK) {
 				perror("read error from dirctory");
 				exit(1);

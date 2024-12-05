@@ -171,6 +171,7 @@ int main()
 				if (FD_ISSET(serv->sock, &readset)) {
 					/* Read the message */
 					if ( (n = SSL_read(serv->ssl, serv->frptr, &(serv->fr[MAX]) - serv->frptr)) < 0) {
+						int err = SSL_get_error(serv->ssl, n);
 						if (errno != EWOULDBLOCK) {
 							perror("read error on socket");
 							servToRemove = serv;

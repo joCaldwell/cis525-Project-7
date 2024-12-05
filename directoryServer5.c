@@ -130,17 +130,22 @@ int main()
 					int val = fcntl(newsockfd, F_GETFL, 0);
 					fcntl(newsockfd, F_SETFL, val | O_NONBLOCK);
 
-					    ssl = SSL_new(ctx);
-						SSL_set_fd(ssl, newsockfd);
+					ssl = SSL_new(ctx);
+					SSL_set_fd(ssl, newsockfd);
 
-						// Perform the SSL handshake with the client
-						if (SSL_accept(ssl) <= 0) {
-							perror("SSL handshake error");
+					/* SSL handshake with the server/client */
+					int handshake_result, err;
+					while ((handshake_result = SSL_accept(ssl)) <= 0) {
+						err = SSL_get_error(ssl, handshake_result);
+						if ((err != SSL_ERROR_WANT_READ) && (err != SSL_ERROR_WANT_WRITE)) {
 							ERR_print_errors_fp(stderr);
-						} else {
-							printf("SSL handshake successful\n");
+							close(newsockfd);
+							SSL_free(ssl);
+							printf("Handshake failed\n");
 						}
-
+					}
+					printf("Handshake successful\n");
+					SSL_free(ssl);
 
 					/* add the socket to the client list */
 					struct server *newServ = malloc(sizeof(struct server));

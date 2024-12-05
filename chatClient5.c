@@ -21,6 +21,7 @@ struct server{
 	uint16_t 			port;
 	LIST_ENTRY(server) 	entries;
 	int 				index;
+	SSL					*ssl;
 };
 
 int main()
@@ -37,26 +38,30 @@ int main()
 	struct server 		*serv, *innerServ;
 	X509_NAME			*subject_name;
 	X509				* cert;
+	SSL_CTX 			*ctx;
+	SSL 				*dir_ssl;
 
 
 	LIST_INIT(&servHead);
 
-	/* openssl stuff */
+	
+	/* SSL Initialization */
 	SSL_library_init();
 	OpenSSL_add_all_algorithms();
 	SSL_load_error_strings();
 
-	SSL_CTX *ctx;
-	SSL *ssl;
-	BIO *bio;
-
-	const char *ca_cert_file = "certs/ca-cert.pem";
 	const SSL_METHOD *method = TLS_client_method();
 	ctx = SSL_CTX_new(method);
 
-
 	if (!ctx) {
 		fprintf(stderr, "Error creating SSL context\n");
+		exit(1);
+	}
+
+	// Load CA certificate to verify the server's certificate
+	if (SSL_CTX_load_verify_locations(ctx, CA_CERT_FILE, NULL) <= 0) {
+		fprintf(stderr, "Error loading CA certificate: 1\n");
+		SSL_CTX_free(ctx);
 		exit(1);
 	}
 
@@ -65,117 +70,29 @@ int main()
 	/* Use this at the command line */
 	/* c_rehash "/../certs" */
 
-
 	// Load CA certificate to verify the server's certificate
-	if (SSL_CTX_load_verify_locations(ctx, ca_cert_file, NULL) <= 0) {
+	if (SSL_CTX_load_verify_locations(ctx, CA_CERT_FILE, NULL) <= 0) {
 		fprintf(stderr, "Error loading CA certificate: 1\n");
 		SSL_CTX_free(ctx);
 		exit(1);
 	}
 
-	/* Do this to connect to server / direcotry */
-	// // Create a new SSL object
-	ssl = SSL_new(ctx);
-	if (ssl <= 0) {
-        fprintf(stderr, "BIO NULL\n");
-		SSL_CTX_free(ctx);
-		exit(1);
-    }
-
-
-	/* Creating an opening a connection */
-	bio = BIO_new_connect("127.0.0.1:4433"); 
-	if(bio == NULL)
-	{
-		fprintf(stderr, "Error creating bio object\n");
-		SSL_free(ssl);
-        SSL_CTX_free(ctx);
-		BIO_free_all(bio);
-		exit(1); 
-	}
-	
-	/* ssl, rbio, wbio */
-	SSL_set_bio(ssl, bio, bio);
-
-	//BIO_get_ssl(bio, &ssl);
-	SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
-
-
-	/* Reading from the connection 
-	int x = BIO_read(bio, buf, len);
-	if(x == 0)
-	{
-		// Handle closed connection /
-	}
-	else if(x < 0)
-	{
-	   if(! BIO_should_retry(bio))
-		{
-			// Handle failed read here /
-		}
-
-		/ Do something to handle the retry /
-	}
-
-
-	 Writing to the connection 
-	if(BIO_write(bio, buf, len) <= 0)
-	{
-		if(! BIO_should_retry(bio))
-		{
-			/ Handle failed write here /
-		}
-
-		/ Do something to handle the retry 
-	}*/
-
-
-	/* Connecting to server */
-	if(BIO_do_connect(bio) <= 0)
-	{
-		if(BIO_should_retry(bio) <= 0){
-			fprintf(stderr, "Error establishing connection");
-			SSL_free(ssl);
-			SSL_CTX_free(ctx);
-			BIO_free_all(bio);
-			exit(1);
-		}
-	}
-
-
-	if(SSL_get_verify_result(ssl) != X509_V_OK)
-	{
-		fprintf(stderr, "Error verifying the CA");
-		exit(1);
-	}
-
-
 	/* Retreive cert from server */
-	cert = SSL_get_peer_certificate(ssl);
+	cert = SSL_get_peer_certificate(dir_ssl);
 
     if (cert <= 0) {
         fprintf(stderr, "No server certificate received\n");
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-		BIO_free_all(bio);
         exit(1);
     }
-
 
 	subject_name = X509_get_subject_name(cert);
     if (subject_name <= 0) {
         fprintf(stderr, "Failed to get subject name from certificate\n");
-        X509_free(cert);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
         exit(1);
     }
 	
     if (X509_NAME_get_text_by_NID(subject_name, NID_commonName, server_cn, sizeof(server_cn)) <= 0) {
         fprintf(stderr, "Error retrieving common name from cert\n");
-        X509_free(cert);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
         exit(1);
     }
 
@@ -201,9 +118,6 @@ int main()
 	/* On connection check sever cn against expected cn */
     if (strcmp(server_cn, expected_cn) != 0) {
         fprintf(stderr, "Common Name mismatch: expected '%s', got '%s'\n", expected_cn, server_cn);
-        X509_free(cert);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
         exit(1);
     }
 
@@ -214,8 +128,55 @@ int main()
 	} 
 
 
+	// Create an SSL object and bind it to the socket
+    dir_ssl = SSL_new(ctx);
+    SSL_set_fd(dir_ssl, sockfd);
+
+    // Initiate the handshake
+	int result;
+    while ((result = SSL_connect(dir_ssl)) <= 0) {
+        int err = SSL_get_error(dir_ssl, result);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+			continue;
+        } else {
+            ERR_print_errors_fp(stderr);
+			printf("SSL handshake failed\n");
+			exit(1);
+        }
+    }
+	printf("SSL handshake successful\n");
+
+		/* Retreive cert from server */
+	cert = SSL_get_peer_certificate(dir_ssl);
+
+    if (cert <= 0) {
+        fprintf(stderr, "No server certificate received\n");
+        exit(1);
+    }
+
+	subject_name = X509_get_subject_name(cert);
+    if (subject_name <= 0) {
+        fprintf(stderr, "Failed to get subject name from certificate\n");
+ 
+        exit(1);
+    }
+	
+    if (X509_NAME_get_text_by_NID(subject_name, NID_commonName, server_cn, sizeof(server_cn)) <= 0) {
+        fprintf(stderr, "Error retrieving common name from cert\n");
+        exit(1);
+    }
+
+	snprintf(expected_cn, MAX, "%s", topic);
+
+	/* On connection check sever cn against expected cn */
+    if (strcmp(server_cn, expected_cn) != 0) {
+        fprintf(stderr, "Common Name mismatch: expected '%s', got '%s'\n", expected_cn, server_cn);
+        exit(1);
+    }
+	fprintf(stdout, "Name verified! \n");
+
 	/* Free certificate */
-	X509_free(cert);
+	//X509_free(cert);
 
 
 	/* tell the directory server we are a client */

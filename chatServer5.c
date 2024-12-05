@@ -341,7 +341,7 @@ int main(int argc, char **argv) {
 					printf("Handshake successful\n");
 
 					/* initialize server variables */
-					struct client *newCli = malloc(sizeof(struct client));
+					//struct client *newCli = malloc(sizeof(struct client));
 					memset(newCli->name, '\0', MAX);
 					newCli->has_name = 0;
 					newCli->sock = newsockfd;

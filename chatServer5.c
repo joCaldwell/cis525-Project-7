@@ -65,6 +65,7 @@ int main(int argc, char **argv) {
 	SSL_CTX 						*ctx;
 	SSL 							*dir_ssl; 
 	BIO 							*bio;
+	SSL_METHOD 						*method;
 
 
 	/* check number of command line arguments */
@@ -94,21 +95,12 @@ int main(int argc, char **argv) {
 	OpenSSL_add_all_algorithms();
 	SSL_load_error_strings();
 
-	const SSL_METHOD *method = TLS_client_method();
+	method = TLS_client_method();
 	ctx = SSL_CTX_new(method);
 
 	if (!ctx) {
 		fprintf(stderr, "Error creating SSL context\n");
 		exit(1);
-	}
-
-	// Soccer server
-	if (strncmp(topic, "soccer", MAX) == 0) {
-		load_certificates(ctx, SOCCER_SERVER_CERT, SOCCER_SERVER_KEY);
-	}
-	// Football server
-	if (strncmp(topic, "football", MAX) == 0) {
-		load_certificates(ctx, FOOTBALL_SERVER_CERT, FOOTBALL_SERVER_KEY);
 	}
 
 	// Load CA certificate to verify the server's certificate
@@ -225,9 +217,7 @@ int main(int argc, char **argv) {
 		}
 	}
 
-
 	// Get verification from directory that registering was successfull
-
 	memset(s, 0, MAX); // clear the buffer
 	for (;;) {
 		FD_ZERO(&readset); FD_ZERO(&writeset);
@@ -269,8 +259,37 @@ int main(int argc, char **argv) {
 		}
 	}
 
-
 	/* RESET TO LISTEN FOR CLIENTS */
+	SSL_free(dir_ssl);
+	SSL_CTX_free(ctx);
+	// method = TLS_server_method();
+	ctx = SSL_CTX_new(TLS_server_method());
+	if (!ctx) {
+		perror("Unable to create SSL context");
+		ERR_print_errors_fp(stderr);
+		exit(EXIT_FAILURE);
+	}
+
+	// Soccer server
+	if (strncmp(topic, "soccer", MAX) == 0) {
+		load_certificates(ctx, SOCCER_SERVER_CERT, SOCCER_SERVER_KEY);
+	}
+
+	// Football server
+	if (strncmp(topic, "football", MAX) == 0) {
+		load_certificates(ctx, FOOTBALL_SERVER_CERT, FOOTBALL_SERVER_KEY);
+	}
+
+	// Load CA certificate to verify the server's certificate
+	if (SSL_CTX_load_verify_locations(ctx, CA_CERT_FILE, NULL) <= 0) {
+		fprintf(stderr, "Error loading CA certificate: 1\n");
+		SSL_CTX_free(ctx);
+		exit(1);
+	}
+
+
+	// SSL_CTX_set_cipher_list(ctx, "ECDHE-RSA-AES256-GCM-SHA384");
+
 	/* Create communication endpoint */
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
 		perror("server: can't open stream socket");
@@ -329,12 +348,12 @@ int main(int argc, char **argv) {
 
 					/* SSL handshake with the server/client */
 					int handshake_result, err;
-					while ((handshake_result = SSL_accept(newCli->ssl)) <= 0) {
+					while ( (handshake_result = SSL_accept(newCli->ssl)) <= 0) {
 						err = SSL_get_error(newCli->ssl, handshake_result);
 						if ((err != SSL_ERROR_WANT_READ) && (err != SSL_ERROR_WANT_WRITE)) {
 							ERR_print_errors_fp(stderr);
-							close(newsockfd);
 							SSL_free(newCli->ssl);
+							close(newsockfd);
 							printf("Handshake failed\n");
 						}
 					}
@@ -367,7 +386,7 @@ int main(int argc, char **argv) {
 					} else if (0 == n) {
 						fprintf(stderr, "%s:%d: EOF on socket\n", __FILE__, __LINE__);
 						if (cli->has_name) {
-							snprintf(messageToSend, MAX, "%s has left the chat", cli->name);
+							snprintf(messageToSend, MAX, "%s has left the chat\n", cli->name);
 
 							LIST_FOREACH(innerCli, &clientHead, entries) {
 								/* Dont send to current client and only tell people who are in the chat. */
@@ -393,7 +412,7 @@ int main(int argc, char **argv) {
 						// The message should be fully read by now.
 						if (sscanf(cli->fr, "%c %[^\n]", &command, message) != 2) {
 							memset(messageToSend, 0, MAX); // clear the buffer
-							snprintf(messageToSend, MAX, "Bad format");
+							snprintf(messageToSend, MAX, "Bad format\n");
 							strncpy(cli->to, messageToSend, MAX);
 							cli->has_message_to_send = 1;
 							break;
@@ -441,12 +460,13 @@ int main(int argc, char **argv) {
 									}									
 									strncpy(cli->to, messageToSend, MAX);
 									cli->has_message_to_send = 1;
+									printf("First user joined: %s\n", message);
 
 								} else {
 									if (cli->has_name) {
-										snprintf(messageToSend, MAX, "%s has changed name to %s", cli->name, message);
+										snprintf(messageToSend, MAX, "%s has changed name to %s\n", cli->name, message);
 									} else {
-										snprintf(messageToSend, MAX, "%s has joined the chat", message);
+										snprintf(messageToSend, MAX, "%s has joined the chat\n", message);
 									}
 									LIST_FOREACH(innerCli, &clientHead, entries) {
 										/* Dont send to current client and only tell people who are in the chat. */
@@ -496,6 +516,7 @@ int main(int argc, char **argv) {
 			/* Sending messages*/
 			LIST_FOREACH(cli, &clientHead, entries) {
 				if (FD_ISSET(cli->sock, &writeset) && cli->has_message_to_send) {
+					printf("sending %s to client\n", cli->to);
 					if ( (n = SSL_write(cli->ssl, cli->toptr, MAX)) < 0) {
 						if (errno != EWOULDBLOCK) {
 							perror("read error on socket");

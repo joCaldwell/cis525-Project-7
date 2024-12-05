@@ -175,6 +175,35 @@ int main(int argc, char **argv) {
     }
 	printf("SSL handshake successful\n");
 
+		/* Retreive cert from server */
+	cert = SSL_get_peer_certificate(ssl);
+
+    if (cert <= 0) {
+        fprintf(stderr, "No server certificate received\n");
+        exit(1);
+    }
+
+	subject_name = X509_get_subject_name(cert);
+    if (subject_name <= 0) {
+        fprintf(stderr, "Failed to get subject name from certificate\n");
+ 
+        exit(1);
+    }
+	
+    if (X509_NAME_get_text_by_NID(subject_name, NID_commonName, server_cn, sizeof(server_cn)) <= 0) {
+        fprintf(stderr, "Error retrieving common name from cert\n");
+        exit(1);
+    }
+
+	snprintf(expected_cn, MAX, "%s", "Directory Server");
+
+	/* On connection check sever cn against expected cn */
+    if (strcmp(server_cn, expected_cn) != 0) {
+        fprintf(stderr, "Common Name mismatch: expected '%s', got '%s'\n", expected_cn, server_cn);
+        exit(1);
+    }
+	fprintf(stdout, "Name verified! \n");
+
 	/* Send port number and topic to the directory server to register it */
 	memset(messageToSend, 0, MAX); // clear the buffer
 	snprintf(messageToSend, MAX, "s %hu %s", port, topic);

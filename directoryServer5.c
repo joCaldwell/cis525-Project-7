@@ -318,8 +318,9 @@ int main()
 			}
 			/* can't remove a list element in the LIST_FOREACH (Known bug) */
 			if (servToRemove != NULL) {
-				/* Remove the server from the list */
+				SSL_free(servToRemove->ssl);
 				close(servToRemove->sock);
+				/* Remove the server from the list */
 				LIST_REMOVE(servToRemove, entries);
 				/* Free the memory for the server */
 				free(servToRemove);
@@ -328,6 +329,7 @@ int main()
 	}
 	/* Cleanup */
 	LIST_FOREACH(serv, &servHead, entries) {
+		SSL_free(serv->ssl);
 		close(serv->sock);
 		free(serv);
 	}

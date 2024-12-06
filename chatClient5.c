@@ -271,7 +271,7 @@ int main()
 		snprintf(expected_cn, MAX, "%s", "Soccer Server");
 	}
 	else if (strncmp(serv->topic , "football", MAX) == 0) {
-		snprintf(expected_cn, MAX, "%s", "Fooball Server");
+		snprintf(expected_cn, MAX, "%s", "Football Server");
 	}
 	else {
 		fprintf(stderr, "Unknown server topic\n");

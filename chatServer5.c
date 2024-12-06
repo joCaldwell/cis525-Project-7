@@ -6,15 +6,48 @@
 #include <sys/select.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include "openssl/ssl.h"
+#include "openssl/bio.h"
+#include "openssl/x509.h"
+#include "openssl/err.h"
 #include "inet.h"
 #include "common.h"
+
+#define FOOTBALL_SERVER_CERT "certs/football-server-cert.crt"
+#define FOOTBALL_SERVER_KEY "certs/football-server-key.pem"
+
+#define SOCCER_SERVER_CERT "certs/soccer-server-cert.crt"
+#define SOCCER_SERVER_KEY "certs/soccer-server-key.pem"
 
 struct client {
 	char 				name[MAX], to[MAX], fr[MAX];
 	char				*toptr, *frptr;
 	int 				has_name, sock, has_message_to_send;
+	SSL					*ssl;
 	LIST_ENTRY(client) 	entries;
 };
+
+void load_certificates(SSL_CTX *ctx, char *cert_file, char *key_file) {
+    // Load the server's certificate
+	if (SSL_CTX_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) <= 0) {
+		ERR_print_errors_fp(stderr);
+		perror("Error loading server certificate");
+		exit(EXIT_FAILURE);
+	}
+
+    // Load the server's private key
+	if (SSL_CTX_use_PrivateKey_file(ctx, key_file, SSL_FILETYPE_PEM) <= 0) {
+		ERR_print_errors_fp(stderr);
+		perror("Error loading server private key");
+		exit(EXIT_FAILURE);
+	}
+
+    // Verify that the private key matches the certificate
+    if (!SSL_CTX_check_private_key(ctx)) {
+        fprintf(stderr, "Private key does not match the certificate\n");
+        exit(EXIT_FAILURE);
+    }
+}
 
 int main(int argc, char **argv) {
 	char							command, s[MAX], topic[MAX], message[MAX], messageToSend[MAX];
@@ -24,14 +57,56 @@ int main(int argc, char **argv) {
 	LIST_HEAD(client_list, client) 	clientHead;
 	fd_set 							readset, writeset;
 	struct sockaddr_in				cli_addr, serv_addr, dir_serv_addr;
-	struct client 					*cli, *innerCli, *cliToRemove;	
+	struct client 					*cli, *innerCli, *cliToRemove;
 
-	/* Initialze the list of clients */
-	LIST_INIT(&clientHead);
+	char							expected_cn[MAX], server_cn[MAX];
+	X509_NAME						*subject_name;
+	X509							*cert;
+	SSL_CTX 						*ctx;
+	SSL 							*dir_ssl; 
+	BIO 							*bio;
+	SSL_METHOD 						*method;
+
 
 	/* check number of command line arguments */
 	if (argc < 3) {
 		perror("server: not enough arguments supplied.\nRun with: `chatserver2 \"<topic>\" <port>`");
+		exit(1);
+	}
+
+	/* assign port number and topic */
+	memset(topic, 0, MAX); // clear the buffer
+	snprintf(topic, MAX, "%s", argv[1]);
+	if ((j = sscanf(argv[2], "%hu", &port)) != 1) {
+		perror("server: port read was unsucessfull (Be sure the second argument is a valid port number)");
+		exit(1);
+	}
+	/* check topic name (must be soccer or football) */
+	if (strncmp(topic, "soccer", MAX) != 0 && strncmp(topic, "football", MAX) != 0) {
+		perror("server: topic must be either soccer or football");
+		exit(1);
+	}
+
+	/* Initialze the list of clients */
+	LIST_INIT(&clientHead);
+
+	/* SSL Initialization */
+	SSL_library_init();
+	OpenSSL_add_all_algorithms();
+	SSL_load_error_strings();
+
+	method = TLS_client_method();
+	ctx = SSL_CTX_new(method);
+
+	if (!ctx) {
+		fprintf(stderr, "Error creating SSL context\n");
+		exit(1);
+	}
+
+	// Load CA certificate to verify the server's certificate
+	if (SSL_CTX_load_verify_locations(ctx, CA_CERT_FILE, NULL) <= 0) {
+		fprintf(stderr, "Error loading CA certificate: 1\n");
+		SSL_CTX_free(ctx);
 		exit(1);
 	}
 
@@ -41,22 +116,11 @@ int main(int argc, char **argv) {
 	dir_serv_addr.sin_addr.s_addr		= inet_addr(SERV_HOST_ADDR);
 	dir_serv_addr.sin_port				= htons(SERV_TCP_PORT);
 
-	/* assign port number and topic */
-	memset(topic, 0, MAX); // clear the buffer
-	snprintf(topic, MAX, "%s", argv[1]);
-	if ((j = sscanf(argv[2], "%hu", &port)) != 1) {
-		perror("server: port read was unsucessfull (Be sure the second argument is a valid port number)");
-		exit(1);
-	}
-
 	/* Create communication endpoint */
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
 		perror("server: can't open stream socket");
 		exit(1);
 	}
-
-	/* Add SO_REAUSEADDR option to prevent address in use errors (modified from: "Hands-On Network
-	* Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
 	int true = 1;
 	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (void *)&true, sizeof(true)) < 0) {
 		perror("server: can't set stream socket address reuse option");
@@ -68,7 +132,6 @@ int main(int argc, char **argv) {
 	serv_addr.sin_family 		= AF_INET;
 	serv_addr.sin_addr.s_addr 	= htonl(INADDR_ANY);
 	serv_addr.sin_port			= htons(port);
-
 	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
 		perror("server: can't bind local address");
 		exit(1);
@@ -80,20 +143,67 @@ int main(int argc, char **argv) {
 		exit(1);
 	} 
 
-	/* Send port number and topic to the directory server to register it */
-	memset(messageToSend, 0, MAX); // clear the buffer
-	snprintf(messageToSend, MAX, "s %hu %s", port, topic);
-
 	/* Set socket to non blocking */
 	int val = fcntl(sockfd, F_GETFL, 0);
 	fcntl(sockfd, F_SETFL, val | O_NONBLOCK);
 
+	// Create an SSL object and bind it to the socket
+    dir_ssl = SSL_new(ctx);
+    SSL_set_fd(dir_ssl, sockfd);
+
+    // Initiate the handshake
+	int result;
+    while ((result = SSL_connect(dir_ssl)) <= 0) {
+        int err = SSL_get_error(dir_ssl, result);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+			continue;
+        } else {
+            ERR_print_errors_fp(stderr);
+			printf("SSL handshake failed\n");
+			exit(1);
+        }
+    }
+	printf("SSL handshake successful\n");
+
+		/* Retreive cert from server */
+	cert = SSL_get_peer_certificate(dir_ssl);
+
+    if (cert <= 0) {
+        fprintf(stderr, "No server certificate received\n");
+        exit(1);
+    }
+
+	subject_name = X509_get_subject_name(cert);
+    if (subject_name <= 0) {
+        fprintf(stderr, "Failed to get subject name from certificate\n");
+ 
+        exit(1);
+    }
+	
+    if (X509_NAME_get_text_by_NID(subject_name, NID_commonName, server_cn, sizeof(server_cn)) <= 0) {
+        fprintf(stderr, "Error retrieving common name from cert\n");
+        exit(1);
+    }
+
+	snprintf(expected_cn, MAX, "%s", "Directory Server");
+
+	/* On connection check sever cn against expected cn */
+    if (strcmp(server_cn, expected_cn) != 0) {
+        fprintf(stderr, "Common Name mismatch: expected '%s', got '%s'\n", expected_cn, server_cn);
+        exit(1);
+    }
+	fprintf(stdout, "Name verified! \n");
+
+	/* Send port number and topic to the directory server to register it */
+	memset(messageToSend, 0, MAX); // clear the buffer
+	snprintf(messageToSend, MAX, "s %hu %s", port, topic);
 
 	for (;;) {
+		printf("Connected to directory server\n");
 		FD_ZERO(&readset); FD_ZERO(&writeset);
 		FD_SET(sockfd, &writeset);
 		if (n = select(sockfd+1, NULL, &writeset, NULL, NULL) > 0) {
-			if ( (n = write(sockfd, messageToSend, MAX)) < 0) {
+			if ( (n = SSL_write(dir_ssl, messageToSend, MAX)) < 0) {
 				if (errno != EWOULDBLOCK) {
 					perror("read error on socket");
 					cliToRemove = cli;
@@ -107,15 +217,13 @@ int main(int argc, char **argv) {
 		}
 	}
 
-
 	// Get verification from directory that registering was successfull
-
 	memset(s, 0, MAX); // clear the buffer
 	for (;;) {
 		FD_ZERO(&readset); FD_ZERO(&writeset);
 		FD_SET(sockfd, &readset);
 		select(sockfd+1, &readset, NULL, NULL, NULL);
-		if (n = (read(sockfd, s, MAX)) < 0) {
+		if ( (n = SSL_read(dir_ssl, s, MAX)) < 0) {
 			if (errno != EWOULDBLOCK) {
 				perror("read error from dirctory");
 				exit(1);
@@ -151,16 +259,42 @@ int main(int argc, char **argv) {
 		}
 	}
 
-
 	/* RESET TO LISTEN FOR CLIENTS */
+	SSL_free(dir_ssl);
+	SSL_CTX_free(ctx);
+	// method = TLS_server_method();
+	ctx = SSL_CTX_new(TLS_server_method());
+	if (!ctx) {
+		perror("Unable to create SSL context");
+		ERR_print_errors_fp(stderr);
+		exit(EXIT_FAILURE);
+	}
+
+	// Soccer server
+	if (strncmp(topic, "soccer", MAX) == 0) {
+		load_certificates(ctx, SOCCER_SERVER_CERT, SOCCER_SERVER_KEY);
+	}
+
+	// Football server
+	if (strncmp(topic, "football", MAX) == 0) {
+		load_certificates(ctx, FOOTBALL_SERVER_CERT, FOOTBALL_SERVER_KEY);
+	}
+
+	// Load CA certificate to verify the server's certificate
+	if (SSL_CTX_load_verify_locations(ctx, CA_CERT_FILE, NULL) <= 0) {
+		fprintf(stderr, "Error loading CA certificate: 1\n");
+		SSL_CTX_free(ctx);
+		exit(1);
+	}
+
+
+	// SSL_CTX_set_cipher_list(ctx, "ECDHE-RSA-AES256-GCM-SHA384");
+
 	/* Create communication endpoint */
 	if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
 		perror("server: can't open stream socket");
 		exit(1);
 	}
-
-	/* Add SO_REAUSEADDR option to prevent address in use errors (modified from: "Hands-On Network
-	* Programming with C" Van Winkle, 2019. https://learning.oreilly.com/library/view/hands-on-network-programming/9781789349863/5130fe1b-5c8c-42c0-8656-4990bb7baf2e.xhtml */
 	true = 1;
 	if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (void *)&true, sizeof(true)) < 0) {
 		perror("server: can't set stream socket address reuse option");
@@ -172,7 +306,6 @@ int main(int argc, char **argv) {
 	serv_addr.sin_family 		= AF_INET;
 	serv_addr.sin_addr.s_addr 	= htonl(INADDR_ANY);
 	serv_addr.sin_port			= htons(port);
- 
 	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) { 
 		perror("server: can't bind local address"); 
 		exit(1); 
@@ -203,12 +336,31 @@ int main(int argc, char **argv) {
 				if ((newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen)) < 0) {
 					/* something bad happend in the connection. Don't create client */
 				} else {
-					/* Set new socket to non blocking */
+					/* Set socket to non blocking */
 					int val = fcntl(newsockfd, F_GETFL, 0);
 					fcntl(newsockfd, F_SETFL, val | O_NONBLOCK);
 
-					/* add the socket to the client list */
+					/* create new server */
 					struct client *newCli = malloc(sizeof(struct client));
+
+					newCli->ssl = SSL_new(ctx);
+					SSL_set_fd(newCli->ssl, newsockfd);
+
+					/* SSL handshake with the server/client */
+					int handshake_result, err;
+					while ( (handshake_result = SSL_accept(newCli->ssl)) <= 0) {
+						err = SSL_get_error(newCli->ssl, handshake_result);
+						if ((err != SSL_ERROR_WANT_READ) && (err != SSL_ERROR_WANT_WRITE)) {
+							ERR_print_errors_fp(stderr);
+							SSL_free(newCli->ssl);
+							close(newsockfd);
+							printf("Handshake failed\n");
+						}
+					}
+					printf("Handshake successful\n");
+
+					/* initialize server variables */
+					//struct client *newCli = malloc(sizeof(struct client));
 					memset(newCli->name, '\0', MAX);
 					newCli->has_name = 0;
 					newCli->sock = newsockfd;
@@ -225,7 +377,7 @@ int main(int argc, char **argv) {
 			LIST_FOREACH(cli, &clientHead, entries) {
 				if (FD_ISSET(cli->sock, &readset)) {
 					/* Read the message */
-					if ( (n = read(cli->sock, cli->frptr, &(cli->fr[MAX]) - cli->frptr)) < 0) {
+					if ( (n = SSL_read(cli->ssl, cli->frptr, &(cli->fr[MAX]) - cli->frptr)) < 0) {
 						if (errno != EWOULDBLOCK) {
 							perror("read error on socket");
 							cliToRemove = cli;
@@ -234,7 +386,7 @@ int main(int argc, char **argv) {
 					} else if (0 == n) {
 						fprintf(stderr, "%s:%d: EOF on socket\n", __FILE__, __LINE__);
 						if (cli->has_name) {
-							snprintf(messageToSend, MAX, "%s has left the chat", cli->name);
+							snprintf(messageToSend, MAX, "%s has left the chat\n", cli->name);
 
 							LIST_FOREACH(innerCli, &clientHead, entries) {
 								/* Dont send to current client and only tell people who are in the chat. */
@@ -260,7 +412,7 @@ int main(int argc, char **argv) {
 						// The message should be fully read by now.
 						if (sscanf(cli->fr, "%c %[^\n]", &command, message) != 2) {
 							memset(messageToSend, 0, MAX); // clear the buffer
-							snprintf(messageToSend, MAX, "Bad format");
+							snprintf(messageToSend, MAX, "Bad format\n");
 							strncpy(cli->to, messageToSend, MAX);
 							cli->has_message_to_send = 1;
 							break;
@@ -308,12 +460,13 @@ int main(int argc, char **argv) {
 									}									
 									strncpy(cli->to, messageToSend, MAX);
 									cli->has_message_to_send = 1;
+									printf("First user joined: %s\n", message);
 
 								} else {
 									if (cli->has_name) {
-										snprintf(messageToSend, MAX, "%s has changed name to %s", cli->name, message);
+										snprintf(messageToSend, MAX, "%s has changed name to %s\n", cli->name, message);
 									} else {
-										snprintf(messageToSend, MAX, "%s has joined the chat", message);
+										snprintf(messageToSend, MAX, "%s has joined the chat\n", message);
 									}
 									LIST_FOREACH(innerCli, &clientHead, entries) {
 										/* Dont send to current client and only tell people who are in the chat. */
@@ -363,7 +516,8 @@ int main(int argc, char **argv) {
 			/* Sending messages*/
 			LIST_FOREACH(cli, &clientHead, entries) {
 				if (FD_ISSET(cli->sock, &writeset) && cli->has_message_to_send) {
-					if ( (n = write(cli->sock, cli->toptr, MAX)) < 0) {
+					printf("sending %s to client\n", cli->to);
+					if ( (n = SSL_write(cli->ssl, cli->toptr, MAX)) < 0) {
 						if (errno != EWOULDBLOCK) {
 							perror("read error on socket");
 							cliToRemove = cli;
@@ -385,6 +539,7 @@ int main(int argc, char **argv) {
 
 			/* can't remove a list element in the LIST_FOREACH (Known bug) */
 			if (cliToRemove != NULL) {
+				SSL_free(cliToRemove->ssl);
 				close(cliToRemove->sock);
 				/* Remove the client from the list */
 				LIST_REMOVE(cliToRemove, entries);
@@ -395,6 +550,7 @@ int main(int argc, char **argv) {
 
 	/* Cleanup */
 	LIST_FOREACH(cli, &clientHead, entries) {
+		SSL_free(cli->ssl);
 		close(cli->sock);
 		free(cli);
 	}

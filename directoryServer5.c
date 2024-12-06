@@ -6,8 +6,14 @@
 #include <sys/select.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <openssl/ssl.h>
+#include <openssl/bio.h>
+#include <openssl/err.h>
 #include "inet.h"
 #include "common.h"
+
+#define DIRECTORY_SERVER_CERT "certs/directory-server-cert.crt"
+#define DIRECTORY_SERVER_KEY "certs/directory-server-key.pem"
 
 struct server{
 	char 				topic[MAX], to[MAX], fr[MAX];
@@ -16,6 +22,7 @@ struct server{
 	struct sockaddr_in 	serv_addr;
 	uint16_t 			port;
 	LIST_ENTRY(server) 	entries;
+	SSL 				*ssl;
 };
 
 int main()
@@ -28,9 +35,43 @@ int main()
 	fd_set 						readset, writeset;
 	struct sockaddr_in 			cli_addr, serv_addr, dir_serv_addr;
 	struct server 				*serv, *innerServ, *servToRemove;
+	SSL_CTX 					*ctx;
 
 	/* Initialze the list of servers */
 	LIST_INIT(&servHead);
+
+	/* openssl initialization */
+	SSL_library_init();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
+    ERR_load_BIO_strings();
+
+    ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx) {
+        perror("Unable to create SSL context");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    // Load the server's certificate
+    if (SSL_CTX_use_certificate_file(ctx, DIRECTORY_SERVER_CERT, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+		perror("Error loading server certificate");
+        exit(EXIT_FAILURE);
+    }
+
+    // Load the server's private key
+    if (SSL_CTX_use_PrivateKey_file(ctx, DIRECTORY_SERVER_KEY, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+		perror("Error loading server private key");
+        exit(EXIT_FAILURE);
+    }
+
+    // Verify that the private key matches the certificate
+    if (!SSL_CTX_check_private_key(ctx)) {
+        fprintf(stderr, "Private key does not match the certificate\n");
+        exit(EXIT_FAILURE);
+    }
 
 	/* initialize server variables */
 	serv = malloc(sizeof(struct server));
@@ -89,8 +130,26 @@ int main()
 					int val = fcntl(newsockfd, F_GETFL, 0);
 					fcntl(newsockfd, F_SETFL, val | O_NONBLOCK);
 
-					/* add the socket to the client list */
+					/* create new server */
 					struct server *newServ = malloc(sizeof(struct server));
+
+					newServ->ssl = SSL_new(ctx);
+					SSL_set_fd(newServ->ssl, newsockfd);
+
+					/* SSL handshake with the server/client */
+					int handshake_result, err;
+					while ((handshake_result = SSL_accept(newServ->ssl)) <= 0) {
+						err = SSL_get_error(newServ->ssl, handshake_result);
+						if ((err != SSL_ERROR_WANT_READ) && (err != SSL_ERROR_WANT_WRITE)) {
+							ERR_print_errors_fp(stderr);
+							close(newsockfd);
+							SSL_free(newServ->ssl);
+							printf("Handshake failed\n");
+						}
+					}
+					printf("Handshake successful\n");
+
+					/* initialize server variables */
 					memset(newServ->topic, '\0', MAX);
 					newServ->has_topic = 0;
 					newServ->has_message_to_send = 0;
@@ -99,6 +158,8 @@ int main()
 					newServ->serv_addr = serv_addr;
 					newServ->toptr = newServ->to;
 					newServ->frptr = newServ->fr;
+
+					/* add the socket to the client list */
 					LIST_INSERT_HEAD(&servHead, newServ, entries);
 				}
 
@@ -109,7 +170,8 @@ int main()
 			LIST_FOREACH(serv, &servHead, entries) {
 				if (FD_ISSET(serv->sock, &readset)) {
 					/* Read the message */
-					if ( (n = read(serv->sock, serv->frptr, &(serv->fr[MAX]) - serv->frptr)) < 0) {
+					if ( (n = SSL_read(serv->ssl, serv->frptr, &(serv->fr[MAX]) - serv->frptr)) < 0) {
+						int err = SSL_get_error(serv->ssl, n);
 						if (errno != EWOULDBLOCK) {
 							perror("read error on socket");
 							servToRemove = serv;
@@ -229,14 +291,14 @@ int main()
 								/* innerServ is a registered chat room */
 								memset(messageToSend, 0, MAX); // clear the buffer
 								snprintf(messageToSend, MAX, "%s %hu %s", inet_ntoa(serv_addr.sin_addr), innerServ->port, innerServ->topic);
-								write(serv->sock, messageToSend, MAX);
+								SSL_write(serv->ssl, messageToSend, MAX);
 							}
 						}
 						serv->has_message_to_send = 0;
 						serv->send_servers_list = 0;
 					// SEND TO SERVER
 					} else {
-						if ( (n = write(serv->sock, serv->toptr, MAX)) < 0) {
+						if ( (n = SSL_write(serv->ssl, serv->toptr, MAX)) < 0) {
 							if (errno != EWOULDBLOCK) {
 								perror("write error on socket");
 								servToRemove = serv;
@@ -256,8 +318,9 @@ int main()
 			}
 			/* can't remove a list element in the LIST_FOREACH (Known bug) */
 			if (servToRemove != NULL) {
-				/* Remove the server from the list */
+				SSL_free(servToRemove->ssl);
 				close(servToRemove->sock);
+				/* Remove the server from the list */
 				LIST_REMOVE(servToRemove, entries);
 				/* Free the memory for the server */
 				free(servToRemove);
@@ -266,6 +329,7 @@ int main()
 	}
 	/* Cleanup */
 	LIST_FOREACH(serv, &servHead, entries) {
+		SSL_free(serv->ssl);
 		close(serv->sock);
 		free(serv);
 	}

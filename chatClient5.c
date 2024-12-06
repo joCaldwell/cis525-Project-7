@@ -1,3 +1,7 @@
+#include "openssl/ssl.h"
+#include "openssl/bio.h"
+#include "openssl/x509.h"
+#include "openssl/err.h"
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -10,28 +14,57 @@
 #include "inet.h"
 #include "common.h"
 
+// install : sudo apt-get install libssl-dev
 
 struct server{
 	char 				topic[MAX], ip[20];
 	uint16_t 			port;
 	LIST_ENTRY(server) 	entries;
 	int 				index;
+	SSL					*ssl;
 };
 
 int main()
 {
 	char 				s[MAX] = {'\0'};
 	fd_set				readset;
-	int					sockfd, i, j, k, selected_serv;
+	int					sockfd, i, j, k, selected_serv, result;
 	ssize_t				nread;
 	struct sockaddr_in 	serv_addr, dir_serv_addr;
 	struct timeval 		timeout;
-	char				topic[MAX], ip[20];
+	char				topic[MAX], ip[20], expected_cn[MAX], server_cn[MAX];
 	uint16_t			port;
 	LIST_HEAD(server_list, server) servHead;
 	struct server 		*serv, *innerServ;
+	X509_NAME			*subject_name;
+	X509				* cert;
+	SSL_CTX 			*ctx;
+	SSL 				*dir_ssl, *serv_ssl;
+	const SSL_METHOD 	*method;
+
 
 	LIST_INIT(&servHead);
+
+	
+	/* SSL Initialization */
+	SSL_library_init();
+	OpenSSL_add_all_algorithms();
+	SSL_load_error_strings();
+
+	method = TLS_client_method();
+	ctx = SSL_CTX_new(method);
+
+	if (!ctx) {
+		fprintf(stderr, "Error creating SSL context\n");
+		exit(1);
+	}
+
+	// Load CA certificate to verify the server's certificate
+	if (SSL_CTX_load_verify_locations(ctx, CA_CERT_FILE, NULL) <= 0) {
+		fprintf(stderr, "Error loading CA certificate: 1\n");
+		SSL_CTX_free(ctx);
+		exit(1);
+	}
 
 	/* Set up the address of the directory server to be contacted. */
 	memset((char *) &dir_serv_addr, 0, sizeof(dir_serv_addr));
@@ -51,25 +84,71 @@ int main()
 		exit(1);
 	} 
 
+	// Create an SSL object and bind it to the socket
+    dir_ssl = SSL_new(ctx);
+    SSL_set_fd(dir_ssl, sockfd);
+
+    // Initiate the handshake
+    while ((result = SSL_connect(dir_ssl)) <= 0) {
+        int err = SSL_get_error(dir_ssl, result);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+			continue;
+        } else {
+            ERR_print_errors_fp(stderr);
+			printf("SSL handshake failed\n");
+			exit(1);
+        }
+    }
+	printf("SSL handshake successful\n");
+
+	/* Retreive cert from server */
+	cert = SSL_get_peer_certificate(dir_ssl);
+
+    if (cert <= 0) {
+        fprintf(stderr, "No server certificate received\n");
+        exit(1);
+    }
+
+	subject_name = X509_get_subject_name(cert);
+    if (subject_name <= 0) {
+        fprintf(stderr, "Failed to get subject name from certificate\n");
+        exit(1);
+    }
+	
+    if (X509_NAME_get_text_by_NID(subject_name, NID_commonName, server_cn, sizeof(server_cn)) <= 0) {
+        fprintf(stderr, "Error retrieving common name from cert\n");
+        exit(1);
+    }
+
+	snprintf(expected_cn, MAX, "%s", "Directory Server");
+
+	/* On connection check sever cn against expected cn */
+    if (strcmp(server_cn, expected_cn) != 0) {
+        fprintf(stderr, "Common Name mismatch: expected '%s', got '%s'\n", expected_cn, server_cn);
+        exit(1);
+    }
+	fprintf(stdout, "Name verified! \n");
+
+	/* Free certificate */
+	X509_free(cert);
+
 	/* tell the directory server we are a client */
 	snprintf(s, MAX, "c");
-	write(sockfd, s, MAX);
-
-	/* Select for directory server */
-	j = 1;
+	SSL_write(dir_ssl, s, MAX);
 
 	/* set timeout of chatroom select to 1 second */
 	timeout.tv_sec = 1;
 	timeout.tv_usec = 0;
 
+	/* Select for directory server */
+	j = 1;
 	for(;;) {
-
 		memset(s, 0, MAX); // clear the buffer
 		FD_ZERO(&readset);
 		FD_SET(sockfd, &readset);
 
 		if ( (k = select(sockfd+1, &readset, NULL, NULL, &timeout)) > 0) {
-			if (read(sockfd, s, MAX) == -1) {
+			if (SSL_read(dir_ssl, s, MAX) == -1) {
 				perror("Something went wrong\n");
 				exit(1);
 			}
@@ -116,7 +195,6 @@ int main()
         }
 	}
 
-
 	LIST_FOREACH(innerServ, &servHead, entries) {
 		if (innerServ->index == selected_serv) {
 			serv = innerServ;
@@ -144,16 +222,75 @@ int main()
 	} 
 
 
+	// Create an SSL object and bind it to the socket
+	SSL_free(dir_ssl);
+	SSL_CTX_free(ctx);
+	ctx = SSL_CTX_new(method);
+
+	// Load CA certificate to verify the server's certificate
+	if (SSL_CTX_load_verify_locations(ctx, CA_CERT_FILE, NULL) <= 0) {
+		fprintf(stderr, "Error loading CA certificate: 1\n");
+		SSL_CTX_free(ctx);
+		exit(1);
+	}
+
+	serv_ssl = SSL_new(ctx);
+	SSL_set_fd(serv_ssl, sockfd);
+
+	// Initiate the handshake
+	result = SSL_connect(serv_ssl);
+	if (result <= 0) {
+		ERR_print_errors_fp(stderr);
+		printf("SSL handshake failed\n");
+		close(sockfd);
+		SSL_free(serv_ssl);
+		SSL_CTX_free(ctx);
+		exit(1);
+	}
+	printf("SSL handshake successful\n");
+
+	/* Retreive cert from server */
+	cert = SSL_get_peer_certificate(serv_ssl);
+
+    if (cert <= 0) {
+        fprintf(stderr, "No server certificate received\n");
+        exit(1);
+    }
+
+	subject_name = X509_get_subject_name(cert);
+    if (subject_name <= 0) {
+        fprintf(stderr, "Failed to get subject name from certificate\n");
+        exit(1);
+    }
+	if (X509_NAME_get_text_by_NID(subject_name, NID_commonName, server_cn, sizeof(server_cn)) <= 0) {
+		fprintf(stderr, "Error retrieving common name from cert\n");
+		exit(1);
+	}
+
+	if (strncmp(serv->topic , "soccer", MAX) == 0) {
+		snprintf(expected_cn, MAX, "%s", "Soccer Server");
+	}
+	else if (strncmp(serv->topic , "football", MAX) == 0) {
+		snprintf(expected_cn, MAX, "%s", "Fooball Server");
+	}
+	else {
+		fprintf(stderr, "Unknown server topic\n");
+		exit(1);
+	}
+
+	/* On connection check sever cn against expected cn */
+    if (strcmp(server_cn, expected_cn) != 0) {
+        fprintf(stderr, "Common Name mismatch: expected '%s', got '%s'\n", expected_cn, server_cn);
+        exit(1);
+    }
 	printf("Listed below are some available commands ...\n");
 	printf("\t`n <name>` - set or change your name\n");
 	printf("\t`s <message>` - Send a message to the preople in the chat room\n");
 
 	for(;;) {
-
 		FD_ZERO(&readset);
 		FD_SET(STDIN_FILENO, &readset);
 		FD_SET(sockfd, &readset);
-
 		if (select(sockfd+1, &readset, NULL, NULL, NULL) > 0)
 		{
 			/* Check whether there's user input to read */
@@ -163,10 +300,11 @@ int main()
 					size_t len = strlen(s);
 					/* replace the new line character at the end of the string with the terminator character. */
 					if (s[len-1] == '\n') {
-						s[len-1] = '\0'; // Jank but I couldn't find another way
+						s[len-1] = '\n'; // Jank but I couldn't find another way
+						s[len] = '\0';
 					}
 					/* Send the user's message to the server */
-					write(sockfd, s, MAX);
+					SSL_write(serv_ssl, s, MAX);
 				} else {
 					printf("Error reading or parsing user input\n");
 				}
@@ -175,7 +313,7 @@ int main()
 			/* Check whether there's a message from the server to read */
 			if (FD_ISSET(sockfd, &readset)) {
 				memset(s, 0, MAX); // clear the buffer
-				if ((nread = read(sockfd, s, MAX)) <= 0) {
+				if ((nread = SSL_read(serv_ssl, s, MAX)) <= 0) {
 					printf("Error reading from server\n");
 					close(sockfd);
 					break;
